@@ -1,4 +1,5 @@
 import pandas as pd
+import os
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 import optuna
@@ -477,7 +478,7 @@ def get_var_type(row):
     return 'Other'
 
 
-def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, variant_type=None):
+def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, variant_type=None, max_length=20):
     """
     Loads and preprocesses the main data.
     
@@ -486,6 +487,7 @@ def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, varia
         sample_col: Name of sample ID column
         required_cols: List of required columns (besides SAMPLE, REF, ALT, paternal_age, maternal_age)
         variant_type: If provided and REF/ALT not present, creates var_type column with this value
+        max_length: Maximum indel length
     """
     print("Loading data...")
     try:
@@ -516,15 +518,20 @@ def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, varia
             df[col] = pd.to_numeric(df[col], errors='coerce')
     
     # Ensure REF and ALT are strings if they exist
-    if 'REF' in df.columns:
-        df['REF'] = df['REF'].astype(str)
-    if 'ALT' in df.columns:
-        df['ALT'] = df['ALT'].astype(str)
+    if 'Ref' in df.columns:
+        df.rename(columns={'Ref': 'REF'}, inplace=True)
+    elif 'Reference' in df.columns:
+        df.rename(columns={'Reference': 'REF'}, inplace=True)
+    if 'Alt' in df.columns:
+        df.rename(columns={'Alt': 'ALT'}, inplace=True)
+    elif 'Alternate' in df.columns:
+        df.rename(columns={'Alternate': 'ALT'}, inplace=True)
+    elif 'Variant' in df.columns:
+        df.rename(columns={'Alternate': 'ALT'}, inplace=True)
 
     # Drop rows with missing essential data
     essential_cols = ['SAMPLE', 'paternal_age', 'maternal_age']
     essential_cols = [c for c in essential_cols if c in df.columns]
-    df.dropna(subset=essential_cols, inplace=True)
     
     # Calculate midparage
     print("Calculating midparage and var_type...")
@@ -544,11 +551,15 @@ def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, varia
         df['var_type'] = 'Unknown'
         print("Warning: No REF/ALT columns and no variant_type specified. Using 'Unknown'.")
     
+    df['length'] = df['Variant'].str.len() - df['Reference'].str.len()
+
+    df = df[np.abs(df['length']) < max_length]
+
     print(f"Loaded {len(df)} variants")
     return df
 
 
-def load_reference_data(filepath, sample_col='SAMPLE', variant_type=None):
+def load_reference_data(filepath, sample_col='SAMPLE', variant_type=None, max_length=20):
     """
     Loads and preprocesses the reference data.
     
@@ -556,6 +567,7 @@ def load_reference_data(filepath, sample_col='SAMPLE', variant_type=None):
         filepath: Path to reference data file
         sample_col: Name of sample ID column in the file
         variant_type: If provided and REF/ALT not present, creates var_type column with this value
+        max_length: Maximum indel length
     """
     print("\nLoading reference data...")
     try:
@@ -566,13 +578,17 @@ def load_reference_data(filepath, sample_col='SAMPLE', variant_type=None):
             df.rename(columns={'pid': 'SAMPLE'}, inplace=True)
         elif sample_col != 'SAMPLE' and sample_col in df.columns:
             df.rename(columns={sample_col: 'SAMPLE'}, inplace=True)
-        
-        # Standardize REF/ALT column names
         if 'Ref' in df.columns:
-            df['REF'] = df['Ref'].astype(str)
+            df.rename(columns={'Ref': 'REF'}, inplace=True)
+        elif 'Reference' in df.columns:
+            df.rename(columns={'Reference': 'REF'}, inplace=True)
         if 'Alt' in df.columns:
-            df['ALT'] = df['Alt'].astype(str)
-        
+            df.rename(columns={'Alt': 'ALT'}, inplace=True)
+        elif 'Alternate' in df.columns:
+            df.rename(columns={'Alternate': 'ALT'}, inplace=True)
+        elif 'Variant' in df.columns:
+            df.rename(columns={'Alternate': 'ALT'}, inplace=True)
+
         # Calculate midparage
         df['midparage'] = (df['paternal_age'] + df['maternal_age']) / 2
         
@@ -587,6 +603,10 @@ def load_reference_data(filepath, sample_col='SAMPLE', variant_type=None):
             df['var_type'] = 'Unknown'
             print("Warning: No REF/ALT columns and no variant_type specified. Using 'Unknown'.")
         
+        df['length'] = df['ALT'].str.len() - df['REF'].str.len()
+
+        df = df[np.abs(df['length']) < max_length]
+
         print("Reference data loaded successfully.")
         return df
     except Exception as e:
@@ -867,8 +887,8 @@ def plot_results(
 
     axes[0].set_ylabel('Number of DNMs per Person', fontsize=14)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig('/mnt/user-data/outputs/dnm_optimization_results.png', dpi=300, bbox_inches='tight')
-    print("\nPlot saved to /mnt/user-data/outputs/dnm_optimization_results.png")
+    plt.savefig('dnm_out/dnm_optimization_results.png', dpi=300, bbox_inches='tight')
+    print("\nPlot saved to dnm_out/dnm_optimization_results.png")
     plt.show()
 
 
@@ -953,7 +973,10 @@ def main(
     np.random.seed(random_seed)
     
     # Load data
-    data_df = load_and_clean_data(data_path, sample_col=sample_col_data, required_cols=column_names)
+    data_df_all = load_and_clean_data(data_path, sample_col=sample_col_data, required_cols=column_names)
+    data_df = data_df_all.copy()
+    data_df.dropna(subset=['paternal_age', 'maternal_age'], inplace=True)
+
     reference_df = load_reference_data(reference_path, sample_col=sample_col_reference)
     
     if data_df is None or reference_df is None:
@@ -1157,11 +1180,16 @@ def main(
             import traceback
             traceback.print_exc()
             continue
-    
+
+    os.mkdir('dnm_out/')
     # Plot results
     if all_optimal_params:
         plot_results(data_df, reference_df, configs, all_optimal_params, sample_col)
     
+    config.apply_filters(data_df_all[data_df_all['var_type']=='SNV'], all_optimal_params['SNV']).to_csv('dnm_out/final_snvs.csv', index=False)
+    config.apply_filters(data_df_all[data_df_all['var_type']=='Insertion'], all_optimal_params['SNV']).to_csv('dnm_out/final_insertion.csv', index=False)
+    config.apply_filters(data_df_all[data_df_all['var_type']=='Deletion'], all_optimal_params['SNV']).to_csv('dnm_out/final_deletions.csv', index=False)
+
     return all_optimal_params
 
 
