@@ -1,0 +1,282 @@
+╔══════════════════════════════════════════════════════════════════════════╗
+║                THREE-STAGE OPTIMIZATION QUICK REFERENCE                  ║
+║             Fast Warmup → Outlier Removal → Full Optimization            ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ YOUR EXACT REQUEST - READY TO USE!                                      │
+└──────────────────────────────────────────────────────────────────────────┘
+
+from optimise_optuna_simplified import main
+
+results = main(
+    'data.tsv',
+    'reference.tsv',
+    min_dnm_count=5,      # Remove if < 5 FILTERED DNMs
+    max_dnm_count=300,    # Remove if > 300 FILTERED DNMs
+    warmup_trials=50,     # Fast warmup optimization
+    n_trials=500          # Full optimization after cleaning
+)
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ WHAT HAPPENS AUTOMATICALLY                                              │
+└──────────────────────────────────────────────────────────────────────────┘
+
+Stage 1: Fast Warmup (50 trials per variant type)
+├─ Quickly learns reasonable filter thresholds
+├─ Example: min_father_DP=12.3, min_child_DP=15.8
+└─ Takes ~1-2 minutes
+
+Stage 2: Apply Filters & Remove Outliers
+├─ Apply warmup filters to all data
+├─ Count FILTERED DNMs per individual (across all variant types)
+├─ Remove individuals with < 5 or > 300 FILTERED DNMs
+└─ Example: Remove 42 low + 18 high = keep 1440/1500 individuals
+
+Stage 3: Full Optimization (500 trials per variant type)
+├─ Optimize on the cleaned dataset
+├─ Find final, production-ready filter parameters
+└─ Example: min_father_DP=14.7, min_child_DP=18.2
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ KEY PARAMETERS                                                           │
+└──────────────────────────────────────────────────────────────────────────┘
+
+Parameter            Purpose                              Typical Value
+─────────────────────────────────────────────────────────────────────────────
+min_dnm_count       Remove if < X FILTERED DNMs           5-10
+max_dnm_count       Remove if > X FILTERED DNMs           200-500
+warmup_trials       Speed of warmup stage                 30-100
+n_trials            Accuracy of final optimization        200-1000
+random_seed         Reproducibility                       Any integer
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ COMMON USE CASES                                                         │
+└──────────────────────────────────────────────────────────────────────────┘
+
+NOISY DATA (Your Case):
+────────────────────────
+main('data.tsv', 'reference.tsv',
+     min_dnm_count=5, max_dnm_count=300,
+     warmup_trials=50, n_trials=500)
+
+VERY NOISY DATA:
+────────────────
+main('data.tsv', 'reference.tsv',
+     min_dnm_count=10, max_dnm_count=200,
+     warmup_trials=50, n_trials=500)
+
+CONSERVATIVE (Keep More Individuals):
+──────────────────────────────────────
+main('data.tsv', 'reference.tsv',
+     min_dnm_count=3, max_dnm_count=500,
+     warmup_trials=50, n_trials=500)
+
+FAST (Less Accurate):
+─────────────────────
+main('data.tsv', 'reference.tsv',
+     min_dnm_count=5, max_dnm_count=300,
+     warmup_trials=30, n_trials=200)
+
+THOROUGH (More Accurate):
+─────────────────────────
+main('data.tsv', 'reference.tsv',
+     min_dnm_count=5, max_dnm_count=300,
+     warmup_trials=100, n_trials=1000)
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ WITH vs WITHOUT WARMUP                                                   │
+└──────────────────────────────────────────────────────────────────────────┘
+
+WITHOUT WARMUP:
+───────────────
+main('data.tsv', 'reference.tsv',
+     min_dnm_count=5, max_dnm_count=300,
+     warmup_trials=None)  # ← No warmup!
+
+Result:
+  ❌ Counts RAW DNMs (unfiltered variants)
+  ❌ Individual with 400 raw variants removed
+     (might have been 280 after quality filtering - should keep!)
+  ❌ Individual with 15 raw variants kept
+     (might have only 2 after quality filtering - should remove!)
+
+WITH WARMUP (Recommended for Noisy Data):
+──────────────────────────────────────────
+main('data.tsv', 'reference.tsv',
+     min_dnm_count=5, max_dnm_count=300,
+     warmup_trials=50)  # ← With warmup!
+
+Result:
+  ✅ Applies quality filters FIRST
+  ✅ Then counts FILTERED DNMs
+  ✅ Individual with 400 raw → 280 filtered DNMs kept
+  ✅ Individual with 15 raw → 2 filtered DNMs removed
+  ✅ More biologically meaningful outlier removal!
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ OUTPUT INTERPRETATION                                                    │
+└──────────────────────────────────────────────────────────────────────────┘
+
+You'll see three clear stages in the output:
+
+STAGE 1: WARMUP OPTIMIZATION
+════════════════════════════════════════════════════════════
+Warmup Optimization: SNV
+============================================================
+Trial 50/50: Loss = 0.0234
+Best trial: min_father_DP=12.3, min_child_DP=15.8, ...
+✓ Warmup complete for SNV
+
+STAGE 2: OUTLIER REMOVAL
+════════════════════════════════════════════════════════════
+OUTLIER REMOVAL: Total Filtered DNMs Across All Variant Types
+============================================================
+Applying warmup filters and counting DNMs per individual...
+  SNV: 45000 → 32000 variants after warmup filters
+  Insertion: 8000 → 6500 variants after warmup filters
+  Deletion: 5000 → 4200 variants after warmup filters
+
+Total individuals before outlier removal: 1500
+Filtered DNM count range: 2 - 420
+Removing 42 individuals with < 5 filtered DNMs
+Removing 18 individuals with > 300 filtered DNMs
+✓ Keeping 1440 individuals after outlier removal
+
+STAGE 3: FULL OPTIMIZATION ON CLEANED DATA
+════════════════════════════════════════════════════════════
+Final Optimization: SNV
+============================================================
+Trial 500/500: Loss = 0.0189
+Best trial: min_father_DP=14.7, min_child_DP=18.2, ...
+
+--- Comparison: Warmup vs Final Parameters ---
+  min_father_DP: 12.3 → 14.7
+  min_child_DP: 15.8 → 18.2
+  ...
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ OPTIONAL PARAMETERS                                                      │
+└──────────────────────────────────────────────────────────────────────────┘
+
+Custom Sample Column Names:
+────────────────────────────
+main('data.tsv', 'reference.tsv',
+     sample_col_data='patient_id',      # Column name in data file
+     sample_col_reference='subject_id',  # Column name in reference file
+     min_dnm_count=5, max_dnm_count=300,
+     warmup_trials=50)
+
+Only Specific Variant Types:
+─────────────────────────────
+main('data.tsv', 'reference.tsv',
+     variant_types=['SNV', 'Insertion'],  # Skip Deletion
+     min_dnm_count=5, max_dnm_count=300,
+     warmup_trials=50)
+
+Custom Column Names to Optimize:
+─────────────────────────────────
+main('data.tsv', 'reference.tsv',
+     column_names=['father_DP', 'mother_DP', 'child_DP', 'GQ'],
+     min_dnm_count=5, max_dnm_count=300,
+     warmup_trials=50)
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ TROUBLESHOOTING                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+
+Problem: "No individuals remaining after outlier removal"
+Solution: Use more lenient thresholds (min=3, max=500)
+
+Problem: "Optimization taking too long"
+Solution: Reduce trials (warmup_trials=30, n_trials=200)
+
+Problem: "Results not accurate enough"
+Solution: Increase trials (warmup_trials=100, n_trials=1000)
+
+Problem: "Too many individuals removed"
+Solution: Widen the range (min=3, max=500)
+
+Problem: "Not enough cleaning"
+Solution: Narrow the range (min=10, max=200)
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ COMPARISON OF APPROACHES                                                 │
+└──────────────────────────────────────────────────────────────────────────┘
+
+Approach          When to Use                              Time    Accuracy
+─────────────────────────────────────────────────────────────────────────────
+No warmup,        High-quality data,                       Fast    Good
+no outliers       already filtered
+
+No warmup,        Need to remove obvious                   Fast    OK
+with outliers     outliers quickly
+
+With warmup,      NOISY DATA (your case)                   Medium  Best
+with outliers     Need robust outlier detection
+
+With warmup,      Want speed boost                         Medium  Good
+no outliers       on high-quality data
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ BOTTOM LINE                                                              │
+└──────────────────────────────────────────────────────────────────────────┘
+
+FOR NOISY DATA (Your Use Case):
+════════════════════════════════
+
+✅ ALWAYS use warmup + outlier removal
+✅ Set warmup_trials=50 (fast) or 100 (thorough)
+✅ Set min_dnm_count=5-10 and max_dnm_count=200-300
+✅ This gives you the most robust outlier detection
+
+WHY IT WORKS:
+═════════════
+
+Traditional: Count raw variants → Remove outliers → Filter
+Your approach: Filter first → Count filtered variants → Remove outliers
+Result: More biologically meaningful, handles noise better!
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ EXAMPLE OUTPUT FROM YOUR SETTINGS                                       │
+└──────────────────────────────────────────────────────────────────────────┘
+
+$ python your_script.py
+
+THREE-STAGE OPTIMIZATION FOR NOISY DATA
+============================================================
+Stage 1: Warmup optimization (50 trials per variant)
+Stage 2: Outlier removal (< 5 or > 300 filtered DNMs)
+Stage 3: Full optimization on cleaned data
+
+STAGE 1: WARMUP OPTIMIZATION
+============================================================
+Warmup Optimization: SNV (50 trials) ✓
+Warmup Optimization: Insertion (50 trials) ✓
+Warmup Optimization: Deletion (50 trials) ✓
+
+STAGE 2: OUTLIER REMOVAL
+============================================================
+Applying warmup filters...
+  SNV: 45000 → 32000 variants after filters
+  Insertion: 8000 → 6500 variants after filters
+  Deletion: 5000 → 4200 variants after filters
+
+Removing 42 individuals with < 5 filtered DNMs
+Removing 18 individuals with > 300 filtered DNMs
+Keeping 1440/1500 individuals ✓
+
+STAGE 3: FULL OPTIMIZATION ON CLEANED DATA
+============================================================
+Final Optimization: SNV (500 trials) ✓
+Final Optimization: Insertion (500 trials) ✓
+Final Optimization: Deletion (500 trials) ✓
+
+DONE! Results saved.
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                            YOU'RE ALL SET!                               ║
+║                                                                          ║
+║  Your exact request is implemented and ready to use!                    ║
+║  Just call main() with warmup_trials + min/max_dnm_count.              ║
+╚══════════════════════════════════════════════════════════════════════════╝
