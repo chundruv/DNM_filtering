@@ -1057,6 +1057,8 @@ def main(
                     regression_weights=config.regression_weights,
                     n_trials=warmup_trials
                 )
+
+                warmup_config.auto_detect_bounds(data_df) 
                 
                 # Run warmup optimization
                 warmup_params = run_optimization_with_config(
