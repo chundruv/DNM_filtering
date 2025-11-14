@@ -33,6 +33,10 @@ class ColumnSpec:
         if self.linked_columns:
             return self.linked_columns
         return [self.column]
+    
+    def get_param_name(self) -> str:
+        """Generate parameter name for Optuna."""
+        return self.column
 
 @dataclass
 class FilterConfig:
@@ -234,7 +238,7 @@ class FilterConfig:
         """Generate parameters for an Optuna trial."""
         params = {}
         for col_spec in self.columns:
-            param_name = col_spec.column()
+            param_name = col_spec.get_param_name()
             if col_spec.suggest_type == 'float':
                 params[param_name] = trial.suggest_float(param_name, col_spec.bounds[0], col_spec.bounds[1])
             elif col_spec.suggest_type == 'int':
@@ -249,7 +253,7 @@ class FilterConfig:
             if col_spec.param_type == 'weight':
                 continue  # Weights don't filter data
             
-            param_name = col_spec.column()
+            param_name = col_spec.get_param_name()
             param_value = params[param_name]
             
             # Get all columns this parameter applies to
@@ -293,7 +297,7 @@ class FilterConfig:
         # Check if intercept weight is being optimized
         for i, col_spec in enumerate(self.columns):
             if col_spec.param_type == 'weight' and 'intercept' in col_spec.column.lower():
-                param_name = col_spec.column()
+                param_name = col_spec.get_param_name()
                 if param_name in params:
                     weights[0] = params[param_name]
                     break
@@ -504,11 +508,12 @@ def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, varia
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    # Ensure REF and ALT are strings if they exist
+    # Standardize REF and ALT column names
     if 'Ref' in df.columns:
         df.rename(columns={'Ref': 'REF'}, inplace=True)
     elif 'Reference' in df.columns:
         df.rename(columns={'Reference': 'REF'}, inplace=True)
+    
     if 'Alt' in df.columns:
         df.rename(columns={'Alt': 'ALT'}, inplace=True)
     elif 'Alternate' in df.columns:
@@ -529,6 +534,10 @@ def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, varia
         # Calculate from REF/ALT
         df['var_type'] = df.apply(get_var_type, axis=1)
         df = df[df['var_type'] != 'Other']
+        
+        # Calculate length and filter
+        df['length'] = df['ALT'].str.len() - df['REF'].str.len()
+        df = df[np.abs(df['length']) < max_length]
     elif variant_type is not None:
         # Use provided variant type
         df['var_type'] = variant_type
@@ -537,10 +546,6 @@ def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, varia
         # Default to 'Unknown'
         df['var_type'] = 'Unknown'
         print("Warning: No REF/ALT columns and no variant_type specified. Using 'Unknown'.")
-    
-    df['length'] = df[''].str.len() - df['REF'].str.len()
-
-    df = df[np.abs(df['length']) < max_length]
 
     print(f"Loaded {len(df)} variants")
     return df
@@ -565,16 +570,19 @@ def load_reference_data(filepath, sample_col='SAMPLE', variant_type=None, max_le
             df.rename(columns={'pid': 'SAMPLE'}, inplace=True)
         elif sample_col != 'SAMPLE' and sample_col in df.columns:
             df.rename(columns={sample_col: 'SAMPLE'}, inplace=True)
+        
+        # Standardize REF and ALT column names
         if 'Ref' in df.columns:
             df.rename(columns={'Ref': 'REF'}, inplace=True)
         elif 'Reference' in df.columns:
             df.rename(columns={'Reference': 'REF'}, inplace=True)
+        
         if 'Alt' in df.columns:
             df.rename(columns={'Alt': 'ALT'}, inplace=True)
         elif 'Alternate' in df.columns:
             df.rename(columns={'Alternate': 'ALT'}, inplace=True)
         elif 'Variant' in df.columns:
-            df.rename(columns={'Alternate': 'ALT'}, inplace=True)
+            df.rename(columns={'Variant': 'ALT'}, inplace=True)
 
         # Calculate midparage
         df['midparage'] = (df['paternal_age'] + df['maternal_age']) / 2
@@ -583,16 +591,16 @@ def load_reference_data(filepath, sample_col='SAMPLE', variant_type=None, max_le
         if 'REF' in df.columns and 'ALT' in df.columns:
             df['var_type'] = df.apply(get_var_type, axis=1)
             df = df[df['var_type'] != 'Other']
+            
+            # Calculate length and filter
+            df['length'] = df['ALT'].str.len() - df['REF'].str.len()
+            df = df[np.abs(df['length']) < max_length]
         elif variant_type is not None:
             df['var_type'] = variant_type
             print(f"Created var_type column with value: {variant_type}")
         else:
             df['var_type'] = 'Unknown'
             print("Warning: No REF/ALT columns and no variant_type specified. Using 'Unknown'.")
-        
-        df['length'] = df['ALT'].str.len() - df['REF'].str.len()
-
-        df = df[np.abs(df['length']) < max_length]
 
         print("Reference data loaded successfully.")
         return df
@@ -802,7 +810,7 @@ def run_optimization_with_config(
     sampler = optuna.samplers.TPESampler(seed=random_seed)
     study = optuna.create_study(direction="minimize", sampler=sampler)
 
-    study.optimize(objective, n_trials=config.n_trials)
+    study.optimize(objective, n_trials=config.n_trials, show_progress_bar=False)
 
     print(f"\n--- Optimization for {config.variant_type} Finished ---")
     print(f"Best Score (MSE) found: {study.best_value:.6f}")
@@ -820,7 +828,8 @@ def plot_results(
     reference_df: pd.DataFrame,
     configs: Dict[str, FilterConfig],
     optimal_params: Dict[str, Dict[str, Any]],
-    sample_col: str = 'SAMPLE'
+    sample_col: str = 'SAMPLE',
+    output_dir: str = 'dnm_out'
 ):
     """Plot results for all variant types."""
     if data_df is None or reference_df is None or not optimal_params:
@@ -874,13 +883,14 @@ def plot_results(
 
     axes[0].set_ylabel('Number of DNMs per Person', fontsize=14)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig('dnm_out/dnm_optimization_results.png', dpi=300, bbox_inches='tight')
-    print("\nPlot saved to dnm_out/dnm_optimization_results.png")
-    plt.show()
+    
+    output_path = os.path.join(output_dir, 'dnm_optimization_results.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"\nPlot saved to {output_path}")
+    plt.close()
 
 
 # --- Main Execution ---
-
 
 def main(
     data_path: str,
@@ -893,8 +903,11 @@ def main(
     sample_col_reference: str = 'SAMPLE',
     min_dnm_count: Optional[int] = None,
     max_dnm_count: Optional[int] = None,
-    warmup_trials: Optional[int] = 100,
-    refine_after_outlier_removal: bool = True
+    warmup_trials: Optional[int] = 50,
+    n_trials: Optional[int] = None,
+    output_dir: str = 'dnm_out',
+    save_filtered_variants: bool = True,
+    refine_after_outlier_removal: bool = True  # Deprecated but kept for compatibility
 ):
     """
     Main optimization pipeline with warmup and outlier removal support.
@@ -922,9 +935,12 @@ def main(
         max_dnm_count: Maximum TOTAL number of FILTERED DNMs per individual (inclusive).
                       After applying warmup filters and counting DNMs, individuals with more
                       total filtered DNMs are removed.
-        warmup_trials: Number of trials for warmup optimization. Default: 100.
+        warmup_trials: Number of trials for warmup optimization. Default: 50.
                       Set to None or 0 to skip warmup (outlier removal happens on raw counts).
                       Warmup optimization is faster and provides initial filters for outlier detection.
+        n_trials: Number of trials for full optimization. If None, uses config.n_trials (default: 500).
+        output_dir: Directory to save results. Default: 'dnm_out'
+        save_filtered_variants: Whether to save filtered variants to CSV files. Default: True
         refine_after_outlier_removal: DEPRECATED - kept for backwards compatibility.
                                      When warmup_trials is set, full optimization always runs after
                                      outlier removal.
@@ -941,10 +957,10 @@ def main(
             'data.tsv', 'reference.tsv',
             min_dnm_count=5,      # Remove individuals with <5 filtered DNMs
             max_dnm_count=300,    # Remove individuals with >300 filtered DNMs
-            warmup_trials=100     # Quick warmup to get initial filters
+            warmup_trials=50      # Quick warmup to get initial filters
         )
         # Process:
-        # 1. Warmup: 100 trials per variant type
+        # 1. Warmup: 50 trials per variant type
         # 2. Apply warmup filters and count DNMs
         # 3. Remove individuals with <5 or >300 filtered DNMs
         # 4. Full optimization: 500 trials (from config.n_trials) on cleaned data
@@ -959,16 +975,20 @@ def main(
     """
     np.random.seed(random_seed)
     
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Output directory: {output_dir}")
+    
     # Load data
-    data_df_all = load_and_clean_data(data_path, sample_col=sample_col_data, required_cols=column_names)
-    data_df = data_df_all.copy()
-    data_df.dropna(subset=['paternal_age', 'maternal_age'], inplace=True)
-
+    data_df = load_and_clean_data(data_path, sample_col=sample_col_data, required_cols=column_names)
     reference_df = load_reference_data(reference_path, sample_col=sample_col_reference)
     
     if data_df is None or reference_df is None:
         print("Error: Could not load required data files.")
         return None
+    
+    # Keep original data for final filtering
+    data_df_original = data_df.copy()
     
     # Standardize sample column to 'SAMPLE' for internal use
     sample_col = 'SAMPLE'
@@ -983,6 +1003,9 @@ def main(
         configs = {}
         for vt in variant_types:
             configs[vt] = get_default_config(vt, column_names)
+            # Override n_trials if specified
+            if n_trials is not None:
+                configs[vt].n_trials = n_trials
             print(f"Auto-detecting bounds for {vt}...")
             configs[vt].auto_detect_bounds(data_df)
     
@@ -999,7 +1022,6 @@ def main(
         print(f"Stage 3: Full optimization on cleaned data")
         print(f"{'='*60}\n")
     
-    data_df_original = data_df.copy()
     all_optimal_params = {}
     all_warmup_params = {}
     
@@ -1167,16 +1189,28 @@ def main(
             import traceback
             traceback.print_exc()
             continue
-
-    os.mkdir('dnm_out/')
+    
     # Plot results
     if all_optimal_params:
-        plot_results(data_df, reference_df, configs, all_optimal_params, sample_col)
+        plot_results(data_df, reference_df, configs, all_optimal_params, sample_col, output_dir)
     
-    config.apply_filters(data_df_all[data_df_all['var_type']=='SNV'], all_optimal_params['SNV']).to_csv('dnm_out/final_snvs.csv', index=False)
-    config.apply_filters(data_df_all[data_df_all['var_type']=='Insertion'], all_optimal_params['SNV']).to_csv('dnm_out/final_insertion.csv', index=False)
-    config.apply_filters(data_df_all[data_df_all['var_type']=='Deletion'], all_optimal_params['SNV']).to_csv('dnm_out/final_deletions.csv', index=False)
-
+    # Save filtered variants if requested
+    if save_filtered_variants and all_optimal_params:
+        print(f"\nSaving filtered variants to {output_dir}/...")
+        for var_type in all_optimal_params.keys():
+            if var_type in configs:
+                config = configs[var_type]
+                params = all_optimal_params[var_type]
+                
+                # Apply filters to original data
+                df_vartype = data_df_original[data_df_original['var_type'] == var_type]
+                filtered_df = config.apply_filters(df_vartype, params)
+                
+                # Save to file
+                output_file = os.path.join(output_dir, f'final_{var_type.lower()}.csv')
+                filtered_df.to_csv(output_file, index=False)
+                print(f"  ✓ Saved {len(filtered_df)} {var_type} variants to {output_file}")
+    
     return all_optimal_params
 
 
@@ -1191,12 +1225,14 @@ if __name__ == "__main__":
         random_seed=RANDOM_SEED
     )
     
-    # Example 2: With outlier removal (removes based on TOTAL DNMs across all variant types)
+    # Example 2: With warmup and outlier removal (RECOMMENDED for noisy data)
     # optimal_params = main(
     #     data_path='data_snv_dnms_for_filtering.tsv',
     #     reference_path='reference_parages.txt',
-    #     min_dnm_count=5,    # Remove individuals with < 5 TOTAL DNMs
-    #     max_dnm_count=300,  # Remove individuals with > 300 TOTAL DNMs
+    #     min_dnm_count=5,      # Remove individuals with < 5 FILTERED DNMs
+    #     max_dnm_count=300,    # Remove individuals with > 300 FILTERED DNMs
+    #     warmup_trials=50,     # Fast warmup optimization
+    #     n_trials=500,         # Full optimization trials
     #     random_seed=RANDOM_SEED
     # )
     
@@ -1208,32 +1244,6 @@ if __name__ == "__main__":
     #     sample_col_reference='subject_id',  # Sample column in reference file
     #     min_dnm_count=10,
     #     max_dnm_count=250,
-    #     random_seed=RANDOM_SEED
-    # )
-    
-    # Example 4: Manual configuration with linked columns and outlier removal
-    # custom_configs = {
-    #     'SNV': get_custom_config(
-    #         variant_type='SNV',
-    #         column_specs=[
-    #             # Link parent depths
-    #             {'column': 'parent_DP', 'param_type': 'min',
-    #              'linked_columns': ['father_DP', 'mother_DP']},
-    #             # Child depth separate
-    #             {'column': 'child_DP', 'param_type': 'min'},
-    #             # Quality score
-    #             {'column': 'quality_score', 'param_type': 'min', 'bounds': (30, 100)},
-    #             # Intercept weight
-    #             {'column': 'intercept', 'param_type': 'weight'},
-    #         ],
-    #         n_trials=500
-    #     )
-    # }
-    # optimal_params = main(
-    #     data_path='data_snv_dnms_for_filtering.tsv',
-    #     reference_path='reference_parages.txt',
-    #     configs=custom_configs,
-    #     min_dnm_count=5,
-    #     max_dnm_count=300,
+    #     warmup_trials=50,
     #     random_seed=RANDOM_SEED
     # )
