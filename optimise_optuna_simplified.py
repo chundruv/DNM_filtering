@@ -551,7 +551,7 @@ def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, varia
         df['var_type'] = 'Unknown'
         print("Warning: No REF/ALT columns and no variant_type specified. Using 'Unknown'.")
     
-    df['length'] = df['Variant'].str.len() - df['Reference'].str.len()
+    df['length'] = df['ALT'].str.len() - df['REF'].str.len()
 
     df = df[np.abs(df['length']) < max_length]
 
