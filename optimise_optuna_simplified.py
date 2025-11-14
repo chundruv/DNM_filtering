@@ -527,7 +527,7 @@ def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, varia
     elif 'Alternate' in df.columns:
         df.rename(columns={'Alternate': 'ALT'}, inplace=True)
     elif 'Variant' in df.columns:
-        df.rename(columns={'Alternate': 'ALT'}, inplace=True)
+        df.rename(columns={'Variant': 'ALT'}, inplace=True)
 
     # Drop rows with missing essential data
     essential_cols = ['SAMPLE', 'paternal_age', 'maternal_age']
