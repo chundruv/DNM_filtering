@@ -33,19 +33,6 @@ class ColumnSpec:
         if self.linked_columns:
             return self.linked_columns
         return [self.column]
-    
-    def get_param_name(self) -> str:
-        """Generate parameter name for Optuna."""
-        if self.param_type == 'min':
-            return f'min_{self.column}'
-        elif self.param_type == 'max':
-            return f'max_{self.column}'
-        elif self.param_type == 'range':
-            return f'range_{self.column}'
-        elif self.param_type == 'weight':
-            return f'weight_{self.column}'
-        return self.column
-
 
 @dataclass
 class FilterConfig:
@@ -247,7 +234,7 @@ class FilterConfig:
         """Generate parameters for an Optuna trial."""
         params = {}
         for col_spec in self.columns:
-            param_name = col_spec.get_param_name()
+            param_name = col_spec.column()
             if col_spec.suggest_type == 'float':
                 params[param_name] = trial.suggest_float(param_name, col_spec.bounds[0], col_spec.bounds[1])
             elif col_spec.suggest_type == 'int':
@@ -262,7 +249,7 @@ class FilterConfig:
             if col_spec.param_type == 'weight':
                 continue  # Weights don't filter data
             
-            param_name = col_spec.get_param_name()
+            param_name = col_spec.column()
             param_value = params[param_name]
             
             # Get all columns this parameter applies to
@@ -306,7 +293,7 @@ class FilterConfig:
         # Check if intercept weight is being optimized
         for i, col_spec in enumerate(self.columns):
             if col_spec.param_type == 'weight' and 'intercept' in col_spec.column.lower():
-                param_name = col_spec.get_param_name()
+                param_name = col_spec.column()
                 if param_name in params:
                     weights[0] = params[param_name]
                     break
@@ -551,7 +538,7 @@ def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, varia
         df['var_type'] = 'Unknown'
         print("Warning: No REF/ALT columns and no variant_type specified. Using 'Unknown'.")
     
-    df['length'] = df['ALT'].str.len() - df['REF'].str.len()
+    df['length'] = df[''].str.len() - df['REF'].str.len()
 
     df = df[np.abs(df['length']) < max_length]
 
