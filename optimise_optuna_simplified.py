@@ -214,15 +214,8 @@ class FilterConfig:
                         upper = int(np.ceil(upper))
                 
                 elif col_spec.param_type == 'range':
-                    # For range filters (like VAF), determine symmetric range
-                    if data_max <= 1.0:
-                        # Data is 0-1, convert to percentage thinking
-                        lower = 0.15
-                        upper = 0.4
-                    else:
-                        # Data is likely 0-100
-                        lower = 15
-                        upper = 40
+                    lower = data_min
+                    upper = data_max
                 
                 col_spec.bounds = (lower, upper)
                 
@@ -1163,6 +1156,8 @@ def main(
             for name, val in zip(model_reference.params.index, targets):
                 print(f"  - {name}: {val:.4f}")
             
+            config.auto_detect_bounds(data_df)
+
             # Run full optimization
             optimal_params = run_optimization_with_config(
                 data_df, config, targets, random_seed, sample_col
