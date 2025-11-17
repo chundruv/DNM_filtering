@@ -462,6 +462,91 @@ def get_var_type(row):
     return 'Other'
 
 
+def auto_convert_numeric_columns(df: pd.DataFrame, exclude_cols: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    Automatically detect and convert string columns to int or float types.
+
+    Handles columns with many NA, '.', or blank values by checking conversion
+    success rate only against non-missing/non-placeholder values.
+
+    Args:
+        df: DataFrame to process
+        exclude_cols: List of column names to exclude from conversion
+
+    Returns:
+        DataFrame with numeric columns converted from strings
+    """
+    if exclude_cols is None:
+        exclude_cols = []
+
+    for col in df.columns:
+        if col in exclude_cols:
+            continue
+
+        # Skip if already numeric
+        if pd.api.types.is_numeric_dtype(df[col]):
+            continue
+
+        # Only process object/string columns
+        if not pd.api.types.is_object_dtype(df[col]):
+            continue
+
+        # Try to convert to numeric
+        # First, create a test series excluding null values and common placeholders
+        test_series = df[col].copy()
+
+        # Convert to string and clean
+        test_series = test_series.astype(str).str.strip().str.replace('"', '', regex=False)
+
+        # Filter out NA indicators: 'nan', 'None', '.', '', 'NA', 'N/A', etc.
+        na_indicators = ['nan', 'None', '.', '', 'NA', 'N/A', 'na', 'n/a', '<NA>']
+        test_series_filtered = test_series[~test_series.isin(na_indicators)]
+
+        if len(test_series_filtered) == 0:
+            # All values are missing/placeholders
+            continue
+
+        # Need at least a few non-missing values to determine type
+        if len(test_series_filtered) < 3:
+            continue
+
+        # Try numeric conversion on the filtered (non-placeholder) values
+        try:
+            converted = pd.to_numeric(test_series_filtered, errors='coerce')
+
+            # Check if most NON-PLACEHOLDER values converted successfully (>90% threshold)
+            # This allows columns with many '.', NA, or blank values to be converted
+            non_null_converted = converted.notna().sum()
+            total_non_placeholder = len(test_series_filtered)
+
+            conversion_rate = non_null_converted / total_non_placeholder if total_non_placeholder > 0 else 0
+
+            if conversion_rate > 0.9:
+                # Apply conversion to full column (including placeholders -> NaN)
+                df_col_clean = df[col].astype(str).str.strip().str.replace('"', '', regex=False)
+                df_col_clean = df_col_clean.replace(na_indicators, pd.NA)
+                df[col] = pd.to_numeric(df_col_clean, errors='coerce')
+
+                # Check if we should use int instead of float
+                if df[col].notna().any():
+                    # Check if all non-null values are integers
+                    non_null_vals = df[col].dropna()
+                    if (non_null_vals % 1 == 0).all():
+                        df[col] = df[col].astype('Int64')  # Nullable integer type
+                        na_count = df[col].isna().sum()
+                        total_count = len(df[col])
+                        print(f"  Converted '{col}' from string to int ({na_count}/{total_count} missing)")
+                    else:
+                        na_count = df[col].isna().sum()
+                        total_count = len(df[col])
+                        print(f"  Converted '{col}' from string to float ({na_count}/{total_count} missing)")
+        except Exception:
+            # Conversion failed, skip this column
+            pass
+
+    return df
+
+
 def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, variant_type=None, max_length=20):
     """
     Loads and preprocesses the main data.
@@ -492,14 +577,10 @@ def load_and_clean_data(filepath, sample_col='SAMPLE', required_cols=None, varia
         df.rename(columns={sample_col: 'SAMPLE'}, inplace=True)
         sample_col = 'SAMPLE'
 
-    # Convert common numeric columns
-    numeric_cols = ['paternal_age', 'maternal_age', 'VAF']
-    if required_cols:
-        numeric_cols.extend([c for c in required_cols if c not in numeric_cols])
-    
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Auto-convert numeric columns from strings
+    print("Auto-detecting and converting numeric columns...")
+    # Exclude REF and ALT from auto-conversion as they should stay as strings
+    df = auto_convert_numeric_columns(df, exclude_cols=['SAMPLE', 'REF', 'ALT', 'Ref', 'Alt', 'Reference', 'Alternate', 'Variant'])
     
     # Standardize REF and ALT column names
     if 'Ref' in df.columns:
@@ -557,19 +638,30 @@ def load_reference_data(filepath, sample_col='SAMPLE', variant_type=None, max_le
     print("\nLoading reference data...")
     try:
         df = pd.read_csv(filepath, sep='\t')
-        
+
+        # Clean quotes from column names and values
+        df.columns = df.columns.str.replace('"', '')
+        for col in df.select_dtypes(include=['object']).columns:
+            if df[col].str.contains('"').any():
+                df[col] = df[col].str.replace('"', '', regex=False)
+
         # Standardize sample column name
         if 'pid' in df.columns:
             df.rename(columns={'pid': 'SAMPLE'}, inplace=True)
         elif sample_col != 'SAMPLE' and sample_col in df.columns:
             df.rename(columns={sample_col: 'SAMPLE'}, inplace=True)
-        
+
+        # Auto-convert numeric columns from strings
+        print("Auto-detecting and converting numeric columns...")
+        # Exclude REF and ALT from auto-conversion as they should stay as strings
+        df = auto_convert_numeric_columns(df, exclude_cols=['SAMPLE', 'REF', 'ALT', 'Ref', 'Alt', 'Reference', 'Alternate', 'Variant', 'pid'])
+
         # Standardize REF and ALT column names
         if 'Ref' in df.columns:
             df.rename(columns={'Ref': 'REF'}, inplace=True)
         elif 'Reference' in df.columns:
             df.rename(columns={'Reference': 'REF'}, inplace=True)
-        
+
         if 'Alt' in df.columns:
             df.rename(columns={'Alt': 'ALT'}, inplace=True)
         elif 'Alternate' in df.columns:
