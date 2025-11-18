@@ -10,17 +10,19 @@ from concurrent.futures import ProcessPoolExecutor
 import hashlib
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config import PipelineConfig
 from .data import VariantDataset
+from .plotting import plot_optimization_results, save_parameters
 
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class OptimizationResult:
-    """Container for optimization results."""
+class OptimisationResult:
+    """Container for optimisation results."""
     best_params: Dict[str, Dict[str, Any]]
     best_scores: Dict[str, float]
     warmup_params: Optional[Dict[str, Dict[str, Any]]]
@@ -30,7 +32,7 @@ class OptimizationResult:
     @property
     def summary(self) -> str:
         """Human-readable summary."""
-        lines = ["Optimization Results:"]
+        lines = ["Optimisation Results:"]
         for var_type, params in self.best_params.items():
             lines.append(f"\n{var_type}:")
             lines.append(f"  Best score: {self.best_scores.get(var_type, 0):.4f}")
@@ -44,8 +46,8 @@ class OptimizationResult:
         return '\n'.join(lines)
 
 
-class OptimizationPipeline:
-    """Three-stage optimization pipeline with caching and parallelization."""
+class OptimisationPipeline:
+    """Three-stage optimisation pipeline with caching and parallelization."""
     
     def __init__(self, config: PipelineConfig):
         self.config = config
@@ -76,53 +78,119 @@ class OptimizationPipeline:
     def run(
         self,
         data: VariantDataset,
-        reference: VariantDataset
-    ) -> OptimizationResult:
+        reference: VariantDataset,
+        output_dir: Optional[Path] = None,
+        generate_plots: bool = True
+    ) -> OptimisationResult:
         """
-        Run complete three-stage optimization pipeline.
-        
-        Stage 1: Warmup optimization (if enabled)
+        Run complete three-stage optimisation pipeline.
+
+        Stage 1: Warmup optimisation (if enabled)
         Stage 2: Outlier removal (if enabled)
-        Stage 3: Full optimization
+        Stage 3: Full optimisation
+
+        Parameters
+        ----------
+        data : VariantDataset
+            Input variant data
+        reference : VariantDataset
+            Reference dataset for regression targets
+        output_dir : Path, optional
+            Directory to save plots and filtered results
+        generate_plots : bool, default=True
+            Whether to automatically generate plots after optimization
+
+        Returns
+        -------
+        OptimisationResult
+            Complete optimization results including parameters and scores
         """
-        logger.info("Starting three-stage optimization pipeline")
-        
+        logger.info("="*60)
+        logger.info("Starting three-stage optimisation pipeline")
+        logger.info("="*60)
+
         # Calculate regression targets from reference
+        logger.info("Calculating regression targets from reference data...")
         targets_by_type = self._calculate_targets(reference)
-        
+        logger.info(f"Targets calculated for {len(targets_by_type)} variant types")
+
         warmup_params = {}
         data_clean = data
         n_removed = 0
-        
+
         # Stage 1: Warmup
+        logger.info("")
+        logger.info("="*60)
+        logger.info("STAGE 1: WARMUP OPTIMISATION")
+        logger.info("="*60)
         if self.config.stage1.enabled:
-            logger.info("Stage 1: Running warmup optimization")
+            logger.info(f"Running warmup with {self.config.stage1.n_trials} trials per variant type...")
             warmup_params = self._run_warmup(data, targets_by_type)
-            logger.info(f"Warmup complete for {len(warmup_params)} variant types")
-        
+            logger.info(f"✓ Warmup complete for {len(warmup_params)} variant types")
+        else:
+            logger.info("Stage 1 disabled in configuration")
+
         # Stage 2: Outlier removal
+        logger.info("")
+        logger.info("="*60)
+        logger.info("STAGE 2: OUTLIER REMOVAL")
+        logger.info("="*60)
         if self.config.stage2.enabled and warmup_params:
-            logger.info("Stage 2: Removing outliers based on filtered DNM counts")
+            logger.info(f"Removing outliers with DNM count range: {self.config.stage2.min_dnm_count}-{self.config.stage2.max_dnm_count}")
             data_clean, n_removed = self._remove_outliers(data, warmup_params)
-            logger.info(f"Removed {n_removed} outlier individuals")
-        
-        # Stage 3: Full optimization
-        logger.info("Stage 3: Running full optimization")
-        final_params, scores, study = self._run_full_optimization(data_clean, targets_by_type)
-        
-        return OptimizationResult(
+            logger.info(f"✓ Removed {n_removed} outlier individuals ({len(data_clean)} samples remaining)")
+        elif self.config.stage2.enabled and not warmup_params:
+            logger.warning("Skipping outlier removal (no warmup parameters available)")
+        else:
+            logger.info("Stage 2 disabled in configuration")
+
+        # Stage 3: Full optimisation
+        logger.info("")
+        logger.info("="*60)
+        logger.info("STAGE 3: FULL BAYESIAN OPTIMISATION")
+        logger.info("="*60)
+        if self.config.stage3.enabled:
+            logger.info(f"Running full optimisation with {self.config.stage3.n_trials} trials...")
+            logger.info(f"Sampler: {self.config.stage3.sampler}, Pruner: {self.config.stage3.pruner}")
+            final_params, scores, study = self._run_full_optimisation(data_clean, targets_by_type)
+            logger.info(f"✓ Full optimisation complete")
+        else:
+            logger.warning("Stage 3 disabled in configuration, using warmup parameters as final")
+            final_params = warmup_params
+            scores = {}
+            study = None
+
+        # Create result object
+        result = OptimisationResult(
             best_params=final_params,
             best_scores=scores,
             warmup_params=warmup_params if warmup_params else None,
             n_individuals_removed=n_removed,
             study=study
         )
+
+        # Generate plots if requested
+        if generate_plots and output_dir and final_params:
+            logger.info("Generating optimization result plots")
+            try:
+                plot_optimization_results(
+                    data_df=data_clean.variants,
+                    reference_df=reference.variants,
+                    best_params=final_params,
+                    output_dir=output_dir,
+                    save_filtered=True
+                )
+                save_parameters(final_params, output_dir)
+            except Exception as e:
+                logger.warning(f"Failed to generate plots: {e}")
+
+        return result
     
     def _calculate_targets(self, reference: VariantDataset) -> Dict[str, np.ndarray]:
         """Calculate regression targets from reference data."""
         targets = {}
         
-        for var_type in self.config.optimization.variant_types:
+        for var_type in self.config.optimisation.variant_types:
             ref_subset = reference.filter_by_type(var_type)
             if len(ref_subset) == 0:
                 continue
@@ -136,7 +204,7 @@ class OptimizationPipeline:
             
             # Fit regression
             try:
-                model = smf.ols(self.config.optimization.regression_formula, data=regression_data).fit()
+                model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
                 targets[var_type] = model.params.values
                 logger.info(f"Calculated targets for {var_type}: {model.params.to_dict()}")
             except Exception as e:
@@ -149,7 +217,7 @@ class OptimizationPipeline:
         data: VariantDataset,
         targets: Dict[str, np.ndarray]
     ) -> Dict[str, Dict[str, Any]]:
-        """Stage 1: Fast warmup optimization."""
+        """Stage 1: Fast warmup optimisation."""
         warmup_params = {}
         
         # Process variant types in parallel if configured
@@ -238,12 +306,12 @@ class OptimizationPipeline:
         clean_data, n_removed = self._remove_outliers(data, warmup_params)
         return clean_data.get_hash(), n_removed
     
-    def _run_full_optimization(
+    def _run_full_optimisation(
         self,
         data: VariantDataset,
         targets: Dict[str, np.ndarray]
     ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, float], Optional[optuna.Study]]:
-        """Stage 3: Full Bayesian optimization."""
+        """Stage 3: Full Bayesian optimisation."""
         final_params = {}
         scores = {}
         studies = {}
@@ -292,30 +360,40 @@ class OptimizationPipeline:
             # Count DNMs
             dnm_counts = filtered.count_by_sample().rename('dnm_count').reset_index()
             regression_data = parental_info.merge(dnm_counts, on='SAMPLE', how='left').fillna(0)
-            
+
+            # Check if we have enough data for regression
+            if len(regression_data) < 3:
+                logger.debug(f"Not enough samples for regression: {len(regression_data)}")
+                return float('inf')
+
             try:
                 # Fit regression
-                model = smf.ols(self.config.optimization.regression_formula, data=regression_data).fit()
+                model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
                 model_params = model.params.values
-                
+
                 # Calculate weighted MSE
                 squared_errors = (model_params - targets) ** 2
-                weights = self.config.optimization.regression_weights
+                weights = self.config.optimisation.regression_weights
                 if len(weights) < len(squared_errors):
                     weights = weights + [1.0] * (len(squared_errors) - len(weights))
                 weighted_errors = squared_errors * weights[:len(squared_errors)]
                 mse = np.mean(weighted_errors)
-                
+
                 # Report for pruning if enabled
                 if use_pruning and trial.number > 0:
                     trial.report(mse, trial.number)
                     if trial.should_prune():
                         raise optuna.TrialPruned()
-                
+
                 return mse
-                
+
             except Exception as e:
-                logger.debug(f"Regression failed: {e}")
+                # Log detailed error information
+                logger.warning(f"Regression failed: {e}")
+                logger.debug(f"  Regression data shape: {regression_data.shape}")
+                logger.debug(f"  DNM count range: {regression_data['dnm_count'].min()}-{regression_data['dnm_count'].max()}")
+                logger.debug(f"  Age columns present: {regression_data.columns.tolist()}")
+                logger.debug(f"  Formula: {self.config.optimisation.regression_formula}")
                 return float('inf')
         
         # Create study
@@ -341,66 +419,104 @@ class OptimizationPipeline:
             study_name=study_name
         )
         
-        # Run optimization
+        # Run optimisation
         study.optimize(
             objective,
             n_trials=n_trials,
             n_jobs=1 if self.config.deterministic else self.config.max_workers
         )
         
-        logger.info(f"Optimization for {study_name} finished. Best score: {study.best_value:.6f}")
+        logger.info(f"Optimisation for {study_name} finished. Best score: {study.best_value:.6f}")
         
         return study.best_params
     
     def _suggest_params(self, trial: optuna.Trial, data: VariantDataset) -> Dict[str, Any]:
         """Suggest filtering parameters based on data distribution."""
         params = {}
-        
-        # Get columns to optimize
-        cols_to_optimize = self.config.optimization.column_names
-        if cols_to_optimize is None:
-            # Use defaults based on available columns
-            possible_cols = ['VAF', 'child_DP', 'father_DP', 'mother_DP', 'QUAL', 'GQ']
-            cols_to_optimize = [c for c in possible_cols if c in data.variants.columns]
-        
-        # Suggest parameters for each column
-        for col in cols_to_optimize:
+
+        # Get columns to optimize from configuration
+        opt_columns = self.config.optimisation.get_optimisation_columns()
+        if not opt_columns:
+            return params
+
+        # Build set of columns that are linked (not the first in their group)
+        # These should NOT be suggested independently
+        linked_groups = self.config.optimisation.get_linked_column_groups()
+        skip_columns = set()
+        for group in linked_groups:
+            if len(group) >= 2:
+                # Skip all columns except the first one
+                for col_config in group[1:]:
+                    skip_columns.add(col_config.name)
+
+        # Suggest parameters for each column using configuration
+        for col_config in opt_columns:
+            col = col_config.name
+
+            # Skip linked columns (they'll be set to match the first column)
+            if col in skip_columns:
+                continue
+
             if col not in data.variants.columns:
                 continue
-            
+
             col_data = pd.to_numeric(data.variants[col], errors='coerce').dropna()
             if len(col_data) == 0:
                 continue
-            
-            # Determine parameter type and bounds
-            if 'DP' in col or 'depth' in col.lower() or 'coverage' in col.lower():
-                # Depth/coverage: suggest minimum threshold
-                lower = col_data.min()
-                upper = col_data.quantile(0.75)
-                if col_data.dtype.kind == 'i':  # Integer
+
+            # Use optimization type from configuration
+            if col_config.optimisation == 'minimum':
+                # suggest miniimum threshold (values below this are filtered)
+                lower = col_data.quantile(0.1)
+                upper = col_data.max()
+                if col_config.dtype == 'int':
                     params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower), int(upper))
                 else:
-                    params[f'min_{col}'] = trial.suggest_float(f'min_{col}', lower, upper)
-            
-            elif 'VAF' in col or 'freq' in col.lower():
-                # Allele frequency: suggest symmetric range
-                if col_data.max() <= 1.0:
-                    # 0-1 scale
-                    params[f'min_{col}'] = trial.suggest_float(f'min_{col}', 0.15, 0.4)
-                else:
-                    # 0-100 scale
-                    params[f'min_{col}'] = trial.suggest_float(f'min_{col}', 15, 40)
-            
-            elif 'QUAL' in col or 'quality' in col.lower() or 'GQ' in col:
-                # Quality scores: minimum threshold
-                lower = col_data.quantile(0.1)
+                    params[f'min_{col}'] = trial.suggest_float(f'min_{col}', float(lower), float(upper))
+
+            elif col_config.optimisation == 'maximum':
+                # suggest maximum threshold (values above this are filtered)
+                lower = col_data.min()
                 upper = col_data.quantile(0.9)
-                params[f'min_{col}'] = trial.suggest_float(f'min_{col}', lower, upper)
-        
-        # Link parent depths if both present
-        if 'min_father_DP' in params and 'min_mother_DP' in params:
-            # Use same threshold for both parents
-            parent_threshold = params['min_father_DP']
-            params['min_mother_DP'] = parent_threshold
-        
+                if col_config.dtype == 'int':
+                    params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower), int(upper))
+                else:
+                    params[f'min_{col}'] = trial.suggest_float(f'min_{col}', float(lower), float(upper))
+
+            elif col_config.optimisation == 'range':
+                # Range: suggest both min and max within the constraint bounds
+                if col_config.range_constraint:
+                    lower_bound = col_config.range_constraint.min
+                    upper_bound = col_config.range_constraint.max
+                else:
+                    lower_bound = col_data.min()
+                    upper_bound = col_data.max()
+
+                if col_config.dtype == 'int':
+                    params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
+                    params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower_bound), int(upper_bound))
+                else:
+                    params[f'min_{col}'] = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
+                    params[f'max_{col}'] = trial.suggest_float(f'max_{col}', float(lower_bound), float(upper_bound))
+
+        # Handle linked columns - copy first column's value to linked columns
+        for group in linked_groups:
+            if len(group) < 2:
+                continue
+
+            # Find parameters for the first column in the group
+            first_col = group[0].name
+            param_keys = [k for k in params.keys() if k.endswith(f'_{first_col}')]
+
+            if param_keys:
+                # Copy the first column's value to all linked columns
+                for key in param_keys:
+                    param_value = params[key]
+                    prefix = key.split('_')[0]  # 'min' or 'max'
+
+                    # Apply same value to all linked columns
+                    for linked_col in group[1:]:
+                        linked_key = f'{prefix}_{linked_col.name}'
+                        params[linked_key] = param_value
+
         return params

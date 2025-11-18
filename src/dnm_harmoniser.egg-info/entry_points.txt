@@ -1,0 +1,2 @@
+[console_scripts]
+dnm-harmoniser = dnm_harmoniser.cli:app

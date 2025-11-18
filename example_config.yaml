@@ -1,0 +1,130 @@
+# Example configuration file for DNM filtering pipeline
+
+stage1:
+  enabled: true
+  n_trials: 50
+
+stage2:
+  enabled: true
+  min_dnm_count: 5
+  max_dnm_count: 300
+
+stage3:
+  enabled: true
+  n_trials: 500
+  sampler: tpe  # Options: tpe, cmaes, random
+  pruner: successive_halving  # Options: successive_halving, hyperband, median, null
+  multivariate: true
+
+optimisation:
+  variant_types:
+    - SNV
+    - Insertion
+    - Deletion
+
+  # Required metadata column names in input data
+  sample_id_column_data: sample_id
+  paternal_age_column_data: paternal_age
+  maternal_age_column_data: maternal_age
+  reference_column_data: ref
+  alternate_column_data: alt
+
+  # Required metadata column names in reference data
+  sample_id_column_reference: sample_id
+  paternal_age_column_reference: paternal_age
+  maternal_age_column_reference: maternal_age
+  reference_column_reference: ref
+  alternate_column_reference: alt
+
+  # Column configurations with types and optimisation criteria
+  columns:
+    # Regular optimization columns
+    # Minimize quality score (lower is better)
+    - name: quality_score
+      dtype: float
+      optimisation: minimum
+
+    # Maximize coverage (higher is better)
+    - name: coverage
+      dtype: int
+      optimisation: maximum
+
+    # Keep allele balance within a symmetric range
+    # Using symmetric_range_constraint where upper = 1 - lower
+    - name: allele_balance
+      dtype: float
+      optimisation: range
+      range_constraint:
+        lower: 0.25
+        scale: 1.0  # For 0-1 range (results in upper=0.75)
+
+    # Example: minimum read position bias
+    - name: read_pos_bias
+      dtype: float
+      optimisation: minimum
+
+    # Example: VAF percentage with symmetric range (for 0-100 scale)
+    - name: vaf_percent
+      dtype: float
+      optimisation: range
+      range_constraint:
+        lower: 25
+        scale: 100  # For percentage range (results in upper=75)
+
+    # Example: keep mapping quality within a regular (non-symmetric) range
+    - name: mapping_quality
+      dtype: int
+      optimisation: range
+      range_constraint:
+        min: 40
+        max: 60
+
+    # Variant-specific columns
+    # SNV-only: base quality (only relevant for single nucleotide variants)
+    - name: base_quality
+      dtype: float
+      optimisation: minimum
+      variant_types:
+        - SNV
+
+    # Indel-only: indel length (only for insertions and deletions)
+    - name: indel_length
+      dtype: int
+      optimisation: range
+      range_constraint:
+        min: 1
+        max: 50
+      variant_types:
+        - Insertion
+        - Deletion
+
+    # Deletion-only: homopolymer length
+    - name: homopolymer_length
+      dtype: int
+      optimisation: maximum
+      variant_types:
+        - Deletion
+
+    # Linked columns (share the same threshold)
+    # Useful for father/mother depth that should have the same minimum
+    - name: depth_father
+      dtype: int
+      optimisation: maximum
+      linked_to: depth_mother
+
+    - name: depth_mother
+      dtype: int
+      optimisation: maximum
+      linked_to: depth_father
+
+  regression_formula: "dnm_count ~ paternal_age + maternal_age"
+  regression_weights: [1.0, 1.0, 1.0]
+
+# Performance settings
+max_workers: 4
+use_cache: true
+cache_dir: null  # null means use default
+
+# Reproducibility
+seed: 42
+deterministic: true

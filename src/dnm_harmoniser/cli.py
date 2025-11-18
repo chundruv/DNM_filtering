@@ -1,4 +1,4 @@
-"""Command-line interface for variant optimizer."""
+"""Command-line interface for DNM harmoniser."""
 
 import typer
 from pathlib import Path
@@ -7,14 +7,14 @@ import yaml
 import logging
 import sys
 
-from .api import optimize_filters, run_optimization, StageRunner
+from .api import optimize_filters, run_optimisation, StageRunner
 from .config import PipelineConfig, PRESETS
 from .data import VariantDataset
 
 
 app = typer.Typer(
-    name="variant-optimize",
-    help="Three-stage Bayesian optimization for genomic variant filtering",
+    name="dnm-harmoniser",
+    help="Three-stage Bayesian optimisation for genomic variant filtering",
     add_completion=False
 )
 
@@ -41,7 +41,7 @@ def run(
         help=f"Configuration preset: {', '.join(PRESETS.keys())}"
     ),
     output: Path = typer.Option("./results", "--output", "-o", help="Output directory"),
-    n_trials: Optional[int] = typer.Option(None, "--n-trials", "-n", help="Number of optimization trials"),
+    n_trials: Optional[int] = typer.Option(None, "--n-trials", "-n", help="Number of optimisation trials"),
     min_dnm: Optional[int] = typer.Option(None, "--min-dnm", help="Minimum DNM count for outlier removal"),
     max_dnm: Optional[int] = typer.Option(None, "--max-dnm", help="Maximum DNM count for outlier removal"),
     workers: Optional[int] = typer.Option(None, "--workers", "-w", help="Number of parallel workers"),
@@ -54,7 +54,7 @@ def run(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show configuration without running")
 ):
     """
-    Run three-stage variant filtering optimization.
+    Run three-stage variant filtering optimisation.
     
     Examples:
     
@@ -64,7 +64,7 @@ def run(
         # Fast testing
         variant-optimize data.tsv reference.tsv --preset fast
         
-        # Thorough optimization with custom trials
+        # Thorough optimisation with custom trials
         variant-optimize data.tsv reference.tsv --preset thorough --n-trials 1000
         
         # Custom outlier removal thresholds
@@ -146,7 +146,7 @@ def run(
         typer.echo("-" * 40)
     
     if dry_run:
-        typer.echo("\nDry run - not executing optimization")
+        typer.echo("\nDry run - not executing optimisation")
         raise typer.Exit(0)
     
     # Create output directory
@@ -155,33 +155,35 @@ def run(
     # Save configuration
     pipeline_config.to_yaml(output / "config.yaml")
     
-    # Run optimization
-    typer.echo(f"\nStarting optimization with {pipeline_config.stage3.n_trials} trials...")
+    # Run optimisation
+    typer.echo(f"\nStarting optimisation with {pipeline_config.stage3.n_trials} trials...")
     typer.echo(f"Output directory: {output}")
-    
+
     try:
-        result = run_optimization(
+        result = run_optimisation(
             data=data,
             reference=reference,
-            config=pipeline_config
+            config=pipeline_config,
+            output_dir=output,          # Pass output directory for automatic plotting
+            generate_plots=True         # Enable automatic plotting
         )
-        
-        # Save results
+
+        # Results are already saved by run_optimisation, but save again for backward compatibility
         with open(output / "optimal_params.yaml", 'w') as f:
             yaml.dump(result.best_params, f, default_flow_style=False)
-        
+
         with open(output / "summary.txt", 'w') as f:
             f.write(result.summary)
-        
+
         # Display summary
         typer.echo("\n" + "="*50)
-        typer.echo("OPTIMIZATION COMPLETE")
+        typer.echo("OPTIMISATION COMPLETE")
         typer.echo("="*50)
         typer.echo(result.summary)
         typer.echo(f"\nResults saved to: {output}")
-        
+
     except Exception as e:
-        typer.echo(f"\nError during optimization: {e}", err=True)
+        typer.echo(f"\nError during optimisation: {e}", err=True)
         if verbose > 0:
             import traceback
             traceback.print_exc()
@@ -200,7 +202,7 @@ def show_presets():
         if config.stage2.enabled and config.stage2.min_dnm_count:
             typer.echo(f"    - Min DNMs: {config.stage2.min_dnm_count}")
             typer.echo(f"    - Max DNMs: {config.stage2.max_dnm_count}")
-        typer.echo(f"  Stage 3: {config.stage3.n_trials} optimization trials")
+        typer.echo(f"  Stage 3: {config.stage3.n_trials} optimisation trials")
         typer.echo(f"    - Sampler: {config.stage3.sampler}")
         typer.echo(f"  Workers: {config.max_workers}")
         typer.echo()
@@ -215,7 +217,7 @@ def validate(
     """
     Validate data files and show statistics.
     
-    Useful for checking data before running optimization.
+    Useful for checking data before running optimisation.
     """
     typer.echo(f"Validating {data}...")
     
@@ -262,7 +264,7 @@ def validate(
             else:
                 typer.echo("\n⚠ Warning: No common variant types between data and reference", err=True)
         
-        typer.echo("\n✓ Validation complete - files are ready for optimization")
+        typer.echo("\n✓ Validation complete - files are ready for optimisation")
         
     except Exception as e:
         typer.echo(f"\n✗ Validation failed: {e}", err=True)
@@ -300,8 +302,8 @@ def init(
                 config.stage2.max_dnm_count = typer.prompt("  Maximum DNM count", default=300, type=int)
         
         # Stage 3
-        if typer.confirm("Configure optimization stage?", default=True):
-            config.stage3.n_trials = typer.prompt("  Optimization trials", default=500, type=int)
+        if typer.confirm("Configure optimisation stage?", default=True):
+            config.stage3.n_trials = typer.prompt("  Optimisation trials", default=500, type=int)
             sampler = typer.prompt(
                 "  Sampler (tpe/cmaes/random)",
                 default="tpe",

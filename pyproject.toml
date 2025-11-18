@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "variant-optimizer"
+name = "dnm-harmoniser"
 version = "0.1.0"
 description = "Three-stage Bayesian optimization for genomic variant filtering"
 readme = "README.md"
@@ -14,10 +14,11 @@ authors = [
 ]
 keywords = [
     "genomics",
-    "variant-filtering", 
+    "variant-filtering",
     "optimization",
     "bayesian-optimization",
-    "bioinformatics"
+    "bioinformatics",
+    "de-novo-mutations"
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -74,24 +75,24 @@ parallel = [
 ]
 
 all = [
-    "variant-optimizer[dev,docs,viz,parallel]",
+    "dnm-harmoniser[dev,docs,viz,parallel]",
 ]
 
 [project.scripts]
-variant-optimize = "variant_optimizer.cli:app"
+dnm-harmoniser = "dnm_harmoniser.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/university-exeter/variant-optimizer"
-Documentation = "https://variant-optimizer.readthedocs.io"
-Repository = "https://github.com/university-exeter/variant-optimizer"
-Issues = "https://github.com/university-exeter/variant-optimizer/issues"
+Homepage = "https://github.com/university-exeter/dnm-harmoniser"
+Documentation = "https://dnm-harmoniser.readthedocs.io"
+Repository = "https://github.com/university-exeter/dnm-harmoniser"
+Issues = "https://github.com/university-exeter/dnm-harmoniser/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["variant_optimizer*"]
+include = ["dnm_harmoniser*"]
 
 [tool.setuptools.package-data]
-variant_optimizer = ["configs/*.yaml", "configs/presets/*.yaml"]
+dnm_harmoniser = ["configs/*.yaml", "configs/presets/*.yaml"]
 
 [tool.black]
 line-length = 100
@@ -123,7 +124,7 @@ minversion = "7.0"
 addopts = [
     "-ra",
     "--strict-markers",
-    "--cov=variant_optimizer",
+    "--cov=dnm_harmoniser",
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
@@ -131,7 +132,7 @@ addopts = [
 testpaths = ["tests"]
 
 [tool.coverage.run]
-source = ["src/variant_optimizer"]
+source = ["src/dnm_harmoniser"]
 omit = ["*/tests/*", "*/test_*.py"]
 
 [tool.coverage.report]

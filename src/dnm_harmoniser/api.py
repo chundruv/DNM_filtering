@@ -1,4 +1,4 @@
-"""Progressive disclosure API for variant optimization."""
+"""Progressive disclosure API for variant optimisation."""
 
 from pathlib import Path
 from typing import Dict, Any, Optional, Union
@@ -6,7 +6,7 @@ import logging
 
 from .config import PipelineConfig, load_config
 from .data import VariantDataset
-from .pipeline import OptimizationPipeline, OptimizationResult
+from .pipeline import OptimisationPipeline, OptimisationResult
 
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ def optimize_filters(
     seed: int = 42
 ) -> Dict[str, Dict[str, Any]]:
     """
-    Simple interface for variant filtering optimization.
+    Simple interface for variant filtering optimisation.
     
     This is the easiest way to use the optimizer - just provide your data
     and reference files, and it handles everything else.
@@ -34,7 +34,7 @@ def optimize_filters(
     reference_path : str or Path
         Path to reference data TSV file
     n_trials : int, default=100
-        Number of optimization trials
+        Number of optimisation trials
     preset : str, default="balanced"
         Configuration preset: "fast", "balanced", "thorough", or "noisy_data"
     output_dir : str or Path, optional
@@ -55,7 +55,7 @@ def optimize_filters(
     >>> # Fast testing
     >>> params = optimize_filters("data.tsv", "reference.tsv", preset="fast")
     
-    >>> # Thorough optimization
+    >>> # Thorough optimisation
     >>> params = optimize_filters("data.tsv", "reference.tsv", n_trials=500, preset="thorough")
     """
     # Load preset configuration
@@ -65,48 +65,68 @@ def optimize_filters(
     
     # Load data
     logger.info(f"Loading data from {data_path}")
-    data = VariantDataset.from_tsv(Path(data_path))
-    
+    data = VariantDataset.from_tsv(
+        Path(data_path),
+        sample_col=config.optimisation.sample_id_column_data,
+        paternal_age_col=config.optimisation.paternal_age_column_data,
+        maternal_age_col=config.optimisation.maternal_age_column_data,
+        reference_col=config.optimisation.reference_column_data,
+        alternate_col=config.optimisation.alternate_column_data
+    )
+
     logger.info(f"Loading reference from {reference_path}")
-    reference = VariantDataset.from_tsv(Path(reference_path))
+    reference = VariantDataset.from_tsv(
+        Path(reference_path),
+        sample_col=config.optimisation.sample_id_column_reference,
+        paternal_age_col=config.optimisation.paternal_age_column_reference,
+        maternal_age_col=config.optimisation.maternal_age_column_reference,
+        reference_col=config.optimisation.reference_column_reference,
+        alternate_col=config.optimisation.alternate_column_reference
+    )
     
-    # Run optimization
-    pipeline = OptimizationPipeline(config)
-    result = pipeline.run(data, reference)
-    
-    # Save results if requested
-    if output_dir:
-        output_path = Path(output_dir)
+    # Run optimisation
+    pipeline = OptimisationPipeline(config)
+
+    # Convert output_dir to Path if provided
+    output_path = Path(output_dir) if output_dir else None
+
+    # Run pipeline with automatic plotting
+    result = pipeline.run(data, reference, output_dir=output_path, generate_plots=True)
+
+    # Save additional results if requested
+    if output_path:
         output_path.mkdir(parents=True, exist_ok=True)
-        
+
         # Save parameters as YAML
         import yaml
         with open(output_path / "optimal_params.yaml", 'w') as f:
             yaml.dump(result.best_params, f)
-        
+
         # Save summary
         with open(output_path / "summary.txt", 'w') as f:
             f.write(result.summary)
-        
+
         logger.info(f"Results saved to {output_path}")
-    
+
     return result.best_params
 
 
 # Level 2: Configuration-based interface (advanced users)
-def run_optimization(
+def run_optimisation(
     data: Union[VariantDataset, Path, str],
     reference: Union[VariantDataset, Path, str],
     config: Optional[PipelineConfig] = None,
     config_file: Optional[Path] = None,
+    output_dir: Optional[Union[str, Path]] = None,
+    generate_plots: bool = True,
     **kwargs
-) -> OptimizationResult:
+) -> OptimisationResult:
     """
-    Run optimization with detailed configuration control.
-    
-    This interface provides more control over the optimization process
+    Run optimisation with detailed configuration control.
+
+    This interface provides more control over the optimisation process
     while still handling the pipeline orchestration.
-    
+
     Parameters
     ----------
     data : VariantDataset, Path, or str
@@ -117,14 +137,18 @@ def run_optimization(
         Configuration object. If None, loads from config_file or uses defaults
     config_file : Path, optional
         Path to YAML configuration file
+    output_dir : str or Path, optional
+        Directory to save plots and filtered results
+    generate_plots : bool, default=True
+        Whether to automatically generate plots after optimization
     **kwargs
         Additional configuration overrides
-    
+
     Returns
     -------
-    OptimizationResult
-        Complete optimization results including parameters, scores, and metadata
-    
+    OptimisationResult
+        Complete optimisation results including parameters, scores, and metadata
+
     Examples
     --------
     >>> # With custom configuration
@@ -133,17 +157,18 @@ def run_optimization(
     ...     stage2=Stage2Config(min_dnm_count=10, max_dnm_count=200),
     ...     stage3=Stage3Config(n_trials=1000, sampler="cmaes")
     ... )
-    >>> result = run_optimization("data.tsv", "reference.tsv", config=config)
-    
+    >>> result = run_optimisation("data.tsv", "reference.tsv", config=config)
+
     >>> # From configuration file
-    >>> result = run_optimization("data.tsv", "reference.tsv", config_file="custom.yaml")
-    
-    >>> # With overrides
-    >>> result = run_optimization(
+    >>> result = run_optimisation("data.tsv", "reference.tsv", config_file="custom.yaml")
+
+    >>> # With overrides and automatic plotting
+    >>> result = run_optimisation(
     ...     "data.tsv", "reference.tsv",
     ...     preset="balanced",
     ...     max_workers=8,
-    ...     stage3__n_trials=1000
+    ...     stage3__n_trials=1000,
+    ...     output_dir="results/"
     ... )
     """
     # Load configuration
@@ -151,29 +176,44 @@ def run_optimization(
         # Process kwargs for configuration overrides
         preset = kwargs.pop('preset', None)
         cli_overrides = {}
-        
+
         # Convert kwargs to dot notation for nested config
         for key, value in kwargs.items():
             # Convert __ to . for nested access (e.g., stage3__n_trials -> stage3.n_trials)
             key = key.replace('__', '.')
             cli_overrides[key] = value
-        
+
         config = load_config(
             config_file=config_file,
             preset=preset,
             cli_overrides=cli_overrides if cli_overrides else None
         )
-    
+
     # Load data if needed
     if isinstance(data, (str, Path)):
-        data = VariantDataset.from_tsv(Path(data))
-    
+        data = VariantDataset.from_tsv(
+            Path(data),
+            sample_col=config.optimisation.sample_id_column_data,
+            paternal_age_col=config.optimisation.paternal_age_column_data,
+            maternal_age_col=config.optimisation.maternal_age_column_data,
+            reference_col=config.optimisation.reference_column_data,
+            alternate_col=config.optimisation.alternate_column_data
+        )
+
     if isinstance(reference, (str, Path)):
-        reference = VariantDataset.from_tsv(Path(reference))
-    
-    # Run pipeline
-    pipeline = OptimizationPipeline(config)
-    return pipeline.run(data, reference)
+        reference = VariantDataset.from_tsv(
+            Path(reference),
+            sample_col=config.optimisation.sample_id_column_reference,
+            paternal_age_col=config.optimisation.paternal_age_column_reference,
+            maternal_age_col=config.optimisation.maternal_age_column_reference,
+            reference_col=config.optimisation.reference_column_reference,
+            alternate_col=config.optimisation.alternate_column_reference
+        )
+
+    # Run pipeline with automatic plotting
+    pipeline = OptimisationPipeline(config)
+    output_path = Path(output_dir) if output_dir else None
+    return pipeline.run(data, reference, output_dir=output_path, generate_plots=generate_plots)
 
 
 # Level 3: Direct stage control (researchers, method development)
@@ -200,7 +240,7 @@ class StageRunner:
     ...     method="isolation_forest"
     ... )
     
-    >>> # Custom optimization
+    >>> # Custom optimisation
     >>> final_params = runner.optimize(
     ...     clean_data, targets,
     ...     sampler=optuna.samplers.QMCSampler()
@@ -210,7 +250,7 @@ class StageRunner:
     def __init__(self, config: Optional[PipelineConfig] = None):
         """Initialize with optional base configuration."""
         self.config = config or PipelineConfig()
-        self.pipeline = OptimizationPipeline(self.config)
+        self.pipeline = OptimisationPipeline(self.config)
     
     def warmup(
         self,
@@ -260,13 +300,13 @@ class StageRunner:
         pruner: Optional[Any] = None,
         **kwargs
     ) -> Dict[str, Dict[str, Any]]:
-        """Run optimization stage with custom settings."""
+        """Run optimisation stage with custom settings."""
         # Can accept custom Optuna samplers/pruners
         original_trials = self.config.stage3.n_trials
         self.config.stage3.n_trials = n_trials
         
         try:
-            params, _, _ = self.pipeline._run_full_optimization(data, targets)
+            params, _, _ = self.pipeline._run_full_optimisation(data, targets)
         finally:
             self.config.stage3.n_trials = original_trials
         
@@ -298,15 +338,22 @@ def calculate_regression_targets(
     dict
         Regression coefficients for each variant type
     """
-    if isinstance(reference, (str, Path)):
-        reference = VariantDataset.from_tsv(Path(reference))
-    
     if variant_types is None:
         variant_types = ["SNV", "Insertion", "Deletion"]
-    
+
     config = PipelineConfig()
-    config.optimization.variant_types = variant_types
-    config.optimization.regression_formula = formula
+
+    if isinstance(reference, (str, Path)):
+        reference = VariantDataset.from_tsv(
+            Path(reference),
+            sample_col=config.optimisation.sample_id_column_reference,
+            paternal_age_col=config.optimisation.paternal_age_column_reference,
+            maternal_age_col=config.optimisation.maternal_age_column_reference,
+            reference_col=config.optimisation.reference_column_reference,
+            alternate_col=config.optimisation.alternate_column_reference
+        )
+    config.optimisation.variant_types = variant_types
+    config.optimisation.regression_formula = formula
     
-    pipeline = OptimizationPipeline(config)
+    pipeline = OptimisationPipeline(config)
     return pipeline._calculate_targets(reference)

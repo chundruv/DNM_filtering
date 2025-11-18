@@ -1,3 +1,60 @@
+Metadata-Version: 2.4
+Name: dnm-harmoniser
+Version: 0.1.0
+Summary: Three-stage Bayesian optimization for genomic variant filtering
+Author-email: University of Exeter <contact@exeter.ac.uk>
+License: MIT
+Project-URL: Homepage, https://github.com/university-exeter/dnm-harmoniser
+Project-URL: Documentation, https://dnm-harmoniser.readthedocs.io
+Project-URL: Repository, https://github.com/university-exeter/dnm-harmoniser
+Project-URL: Issues, https://github.com/university-exeter/dnm-harmoniser/issues
+Keywords: genomics,variant-filtering,optimization,bayesian-optimization,bioinformatics,de-novo-mutations
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: pandas>=2.0
+Requires-Dist: numpy>=1.24
+Requires-Dist: optuna>=3.3
+Requires-Dist: statsmodels>=0.14
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: pydantic>=2.0
+Requires-Dist: typer>=0.9
+Requires-Dist: joblib>=1.3
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0; extra == "dev"
+Requires-Dist: pytest-xdist>=3.0; extra == "dev"
+Requires-Dist: hypothesis>=6.0; extra == "dev"
+Requires-Dist: black>=23.0; extra == "dev"
+Requires-Dist: ruff>=0.1; extra == "dev"
+Requires-Dist: mypy>=1.0; extra == "dev"
+Requires-Dist: pre-commit>=3.0; extra == "dev"
+Provides-Extra: docs
+Requires-Dist: sphinx>=7.0; extra == "docs"
+Requires-Dist: pydata-sphinx-theme>=0.14; extra == "docs"
+Requires-Dist: myst-parser>=2.0; extra == "docs"
+Requires-Dist: sphinx-autodoc-typehints>=1.25; extra == "docs"
+Requires-Dist: nbsphinx>=0.9; extra == "docs"
+Requires-Dist: sphinx-copybutton>=0.5; extra == "docs"
+Provides-Extra: viz
+Requires-Dist: matplotlib>=3.7; extra == "viz"
+Requires-Dist: seaborn>=0.12; extra == "viz"
+Provides-Extra: parallel
+Requires-Dist: dask[complete]>=2023.1; extra == "parallel"
+Requires-Dist: ray>=2.0; extra == "parallel"
+Provides-Extra: all
+Requires-Dist: dnm-harmoniser[dev,docs,parallel,viz]; extra == "all"
+Dynamic: license-file
+
 # Variant Optimizer
 
 Three-stage Bayesian optimization for genomic variant filtering with warmup, outlier removal, and full optimization.

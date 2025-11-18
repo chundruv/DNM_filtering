@@ -43,30 +43,53 @@ class VariantDataset:
     
     @classmethod
     def from_tsv(
-        cls, 
+        cls,
         path: Path,
         sample_col: str = 'SAMPLE',
+        paternal_age_col: str = 'paternal_age',
+        maternal_age_col: str = 'maternal_age',
+        reference_col: str = 'ref',
+        alternate_col: str = 'alt',
         required_cols: Optional[List[str]] = None,
         max_length: int = 20
     ) -> 'VariantDataset':
         """Load from TSV file with automatic preprocessing."""
         df = pd.read_csv(path, sep='\t', on_bad_lines='skip', low_memory=False)
-        
+
         # Clean quotes
         df.columns = df.columns.str.replace('"', '')
         for col in df.select_dtypes(include=['object']).columns:
             if df[col].astype(str).str.contains('"').any():
                 df[col] = df[col].str.replace('"', '', regex=False)
-        
+
         # Standardize column names
         if sample_col != 'SAMPLE' and sample_col in df.columns:
             df.rename(columns={sample_col: 'SAMPLE'}, inplace=True)
-        
-        # Handle REF/ALT standardization
-        for old, new in [('Ref', 'REF'), ('Reference', 'REF'), 
-                          ('Alt', 'ALT'), ('Alternate', 'ALT'), ('Variant', 'ALT')]:
-            if old in df.columns:
-                df.rename(columns={old: new}, inplace=True)
+
+        if paternal_age_col != 'paternal_age' and paternal_age_col in df.columns:
+            df.rename(columns={paternal_age_col: 'paternal_age'}, inplace=True)
+
+        if maternal_age_col != 'maternal_age' and maternal_age_col in df.columns:
+            df.rename(columns={maternal_age_col: 'maternal_age'}, inplace=True)
+
+        # Standardize reference and alternate column names
+        if reference_col != 'REF' and reference_col in df.columns:
+            df.rename(columns={reference_col: 'REF'}, inplace=True)
+        elif reference_col.lower() != 'ref':
+            # Handle common variations if not already standardized
+            for old in ['Ref', 'Reference', 'ref', 'reference']:
+                if old in df.columns and old != reference_col:
+                    df.rename(columns={old: 'REF'}, inplace=True)
+                    break
+
+        if alternate_col != 'ALT' and alternate_col in df.columns:
+            df.rename(columns={alternate_col: 'ALT'}, inplace=True)
+        elif alternate_col.lower() != 'alt':
+            # Handle common variations if not already standardized
+            for old in ['Alt', 'Alternate', 'alt', 'alternate', 'Variant']:
+                if old in df.columns and old != alternate_col:
+                    df.rename(columns={old: 'ALT'}, inplace=True)
+                    break
         
         # Calculate variant type
         if 'REF' in df.columns and 'ALT' in df.columns:
@@ -78,11 +101,16 @@ class VariantDataset:
         if 'paternal_age' in df.columns and 'maternal_age' in df.columns:
             df['midparage'] = (df['paternal_age'] + df['maternal_age']) / 2
         
-        # Convert numeric columns
-        numeric_cols = ['paternal_age', 'maternal_age', 'VAF', 'QUAL', 'DP']
+        # Convert numeric columns (including common variant filtering columns)
+        numeric_cols = [
+            'paternal_age', 'maternal_age', 'VAF', 'QUAL', 'DP',
+            'IMF', 'DNM', 'MQ', 'DeNovoCNN_prob', 'nparAADn0',
+            'child_coverage', 'father_coverage', 'mother_coverage',
+            'FS', 'GQ', 'PL', 'AD', 'IDV', 'RPBZ', 'MQBZ', 'BQBZ', 'MQSBZ', 'SCBZ', 'SGB', 'MQ0F'
+        ]
         if required_cols:
             numeric_cols.extend([c for c in required_cols if c not in numeric_cols])
-        
+
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
