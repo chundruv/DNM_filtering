@@ -6,14 +6,14 @@ import numpy as np
 from pathlib import Path
 from hypothesis import given, strategies as st
 
-from variant_optimizer import (
+from dnm_harmoniser import (
     PipelineConfig,
     VariantDataset,
     optimize_filters,
     run_optimization
 )
-from variant_optimizer.config import PRESETS
-from variant_optimizer.pipeline import OptimizationPipeline
+from dnm_harmoniser.config import PRESETS
+from dnm_harmoniser.pipeline import OptimizationPipeline
 
 
 # Fixtures

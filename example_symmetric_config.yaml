@@ -1,0 +1,162 @@
+# Example configuration showing symmetric range constraints
+# This demonstrates the new SymmetricRangeConstraint feature
+
+stage1:
+  enabled: true
+  n_trials: 50
+
+stage2:
+  enabled: true
+  min_dnm_count: 5
+  max_dnm_count: 300
+
+stage3:
+  enabled: true
+  n_trials: 500
+  sampler: tpe
+  pruner: successive_halving
+  multivariate: true
+
+optimisation:
+  variant_types:
+    - SNV
+    - Insertion
+    - Deletion
+
+  # Required metadata column names in input data
+  sample_id_column_data: sample_id
+  paternal_age_column_data: paternal_age
+  maternal_age_column_data: maternal_age
+  reference_column_data: ref
+  alternate_column_data: alt
+
+  # Required metadata column names in reference data
+  sample_id_column_reference: sample_id
+  paternal_age_column_reference: paternal_age
+  maternal_age_column_reference: maternal_age
+  reference_column_reference: ref
+  alternate_column_reference: alt
+
+  columns:
+    # ========================================
+    # SYMMETRIC RANGE CONSTRAINTS
+    # ========================================
+
+    # Allele Balance: Keep between 0.25-0.75 (symmetric around 0.5)
+    # Upper bound is automatically calculated as: 1.0 - 0.25 = 0.75
+    - name: allele_balance
+      dtype: float
+      optimisation: range
+      range_constraint:
+        lower: 0.25
+        scale: 1.0  # Use 1.0 for 0-1 normalized values
+
+    # VAF Percentage: Keep between 25%-75% (symmetric around 50%)
+    # Upper bound is automatically calculated as: 100 - 25 = 75
+    - name: vaf_percent
+      dtype: float
+      optimisation: range
+      range_constraint:
+        lower: 25
+        scale: 100  # Use 100 for percentage values
+
+    # Heterozygosity: Keep between 0.30-0.70 (symmetric around 0.5)
+    - name: heterozygosity
+      dtype: float
+      optimisation: range
+      range_constraint:
+        lower: 0.30
+        scale: 1.0
+
+    # ========================================
+    # REGULAR (NON-SYMMETRIC) RANGE CONSTRAINTS
+    # ========================================
+
+    # Mapping Quality: Keep between 40-60 (not symmetric around any particular value)
+    # Here we specify both min and max explicitly
+    - name: mapping_quality
+      dtype: int
+      optimisation: range
+      range_constraint:
+        min: 40
+        max: 60
+
+    # GC Content: Keep between 0.35-0.65 (not symmetric - you choose both bounds)
+    - name: gc_content
+      dtype: float
+      optimisation: range
+      range_constraint:
+        min: 0.35
+        max: 0.65
+
+    # ========================================
+    # OTHER OPTIMISATION TYPES
+    # ========================================
+
+    # Minimize: Lower is better
+    - name: quality_score
+      dtype: float
+      optimisation: minimum
+
+    - name: strand_bias
+      dtype: float
+      optimisation: minimum
+
+    # Maximize: Higher is better
+    - name: coverage
+      dtype: int
+      optimisation: maximum
+
+    - name: read_depth
+      dtype: int
+      optimisation: maximum
+
+    # ========================================
+    # VARIANT-SPECIFIC COLUMNS
+    # ========================================
+
+    # SNV-only: Base quality (only relevant for single nucleotide variants)
+    - name: base_quality
+      dtype: float
+      optimisation: minimum
+      variant_types:
+        - SNV
+
+    # Indel-only: Indel length with symmetric constraint
+    # Keep indel lengths between 1-49 bp (symmetric around 25)
+    - name: indel_length
+      dtype: int
+      optimisation: range
+      range_constraint:
+        lower: 1
+        scale: 50
+      variant_types:
+        - Insertion
+        - Deletion
+
+    # ========================================
+    # LINKED COLUMNS
+    # ========================================
+
+    # Father and mother depth share the same threshold
+    - name: depth_father
+      dtype: int
+      optimisation: maximum
+      linked_to: depth_mother
+
+    - name: depth_mother
+      dtype: int
+      optimisation: maximum
+      linked_to: depth_father
+
+  regression_formula: "dnm_count ~ paternal_age + maternal_age"
+  regression_weights: [1.0, 1.0, 1.0]
+
+# Performance settings
+max_workers: 4
+use_cache: true
+cache_dir: null
+
+# Reproducibility
+seed: 42
+deterministic: true
