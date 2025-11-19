@@ -233,22 +233,22 @@ class OptimisationPipeline:
                         f"warmup_{var_type}"
                     )
                     futures[var_type] = future
-                
+
                 for var_type, future in futures.items():
-                    result = future.result()
-                    if result:
-                        warmup_params[var_type] = result
+                    params, _ = future.result()
+                    if params:
+                        warmup_params[var_type] = params
         else:
             # Sequential processing for deterministic results
             for var_type in targets:
-                result = self._optimize_variant_type(
+                params, _ = self._optimize_variant_type(
                     data.filter_by_type(var_type),
                     targets[var_type],
                     self.config.stage1.n_trials,
                     f"warmup_{var_type}"
                 )
-                if result:
-                    warmup_params[var_type] = result
+                if params:
+                    warmup_params[var_type] = params
         
         return warmup_params
     
@@ -315,9 +315,9 @@ class OptimisationPipeline:
         final_params = {}
         scores = {}
         studies = {}
-        
+
         for var_type in targets:
-            params = self._optimize_variant_type(
+            params, best_score = self._optimize_variant_type(
                 data.filter_by_type(var_type),
                 targets[var_type],
                 self.config.stage3.n_trials,
@@ -326,9 +326,8 @@ class OptimisationPipeline:
             )
             if params:
                 final_params[var_type] = params
-                # Store score (we'd need to modify _optimize_variant_type to return this)
-                scores[var_type] = 0.0  # Placeholder
-        
+                scores[var_type] = best_score
+
         return final_params, scores, None  # Return None for study for now
     
     def _optimize_variant_type(
@@ -338,11 +337,15 @@ class OptimisationPipeline:
         n_trials: int,
         study_name: str,
         use_pruning: bool = False
-    ) -> Optional[Dict[str, Any]]:
-        """Optimize filtering parameters for one variant type."""
-        
+    ) -> Tuple[Optional[Dict[str, Any]], float]:
+        """Optimize filtering parameters for one variant type.
+
+        Returns:
+            Tuple of (best_params, best_score). If optimization fails, returns (None, inf).
+        """
+
         if len(data) == 0:
-            return None
+            return None, float('inf')
         
         # Get parental ages
         parental_info = data.variants[['SAMPLE', 'paternal_age', 'maternal_age']].drop_duplicates()
@@ -371,21 +374,25 @@ class OptimisationPipeline:
                 model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
                 model_params = model.params.values
 
-                # Calculate weighted MSE
-                squared_errors = (model_params - targets) ** 2
-                weights = self.config.optimisation.regression_weights
-                if len(weights) < len(squared_errors):
-                    weights = weights + [1.0] * (len(squared_errors) - len(weights))
-                weighted_errors = squared_errors * weights[:len(squared_errors)]
-                mse = np.mean(weighted_errors)
+                # Calculate weighted mean squared RELATIVE error
+                # This treats percentage deviations equally across variant types
+                # regardless of coefficient magnitude
+                relative_errors = (model_params - targets) / (np.abs(targets) + 1e-10)
+                squared_relative_errors = relative_errors ** 2
+
+                # Use intercept_weight for intercept, 1.0 for other coefficients
+                intercept_weight = params.get('intercept_weight', 1.0)
+                weights = [intercept_weight] + [1.0] * (len(squared_relative_errors) - 1)
+                weighted_errors = squared_relative_errors * weights[:len(squared_relative_errors)]
+                msre = np.mean(weighted_errors)
 
                 # Report for pruning if enabled
                 if use_pruning and trial.number > 0:
-                    trial.report(mse, trial.number)
+                    trial.report(msre, trial.number)
                     if trial.should_prune():
                         raise optuna.TrialPruned()
 
-                return mse
+                return msre
 
             except Exception as e:
                 # Log detailed error information
@@ -427,8 +434,40 @@ class OptimisationPipeline:
         )
         
         logger.info(f"Optimisation for {study_name} finished. Best score: {study.best_value:.6f}")
-        
-        return study.best_params
+
+        # Add detailed logging about the best trial
+        try:
+            best_params = study.best_params
+
+            # Apply best filters to get final data
+            filtered = data.apply_filters(best_params)
+            retention_rate = len(filtered) / len(data) * 100 if len(data) > 0 else 0
+
+            # Calculate DNM counts and fit regression
+            dnm_counts = filtered.count_by_sample().rename('dnm_count').reset_index()
+            regression_data = parental_info.merge(dnm_counts, on='SAMPLE', how='left').fillna(0)
+
+            # Fit regression to get actual coefficients
+            model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
+            fitted_coeffs = dict(zip(model.params.index, model.params.values))
+            target_coeffs = dict(zip(model.params.index, targets))
+
+            logger.info(f"  Retention: {len(filtered)}/{len(data)} variants ({retention_rate:.1f}%)")
+            logger.info(f"  Samples: {len(regression_data)} with DNM counts")
+            logger.info(f"  Target coefficients: {', '.join([f'{k}={v:.4f}' for k, v in target_coeffs.items()])}")
+            logger.info(f"  Fitted coefficients: {', '.join([f'{k}={v:.4f}' for k, v in fitted_coeffs.items()])}")
+
+            # Calculate and log absolute and relative errors
+            errors = {k: fitted_coeffs[k] - target_coeffs[k] for k in target_coeffs.keys()}
+            relative_errors = {k: (fitted_coeffs[k] - target_coeffs[k]) / target_coeffs[k] * 100
+                             for k in target_coeffs.keys()}
+            logger.info(f"  Absolute errors: {', '.join([f'{k}={v:+.4f}' for k, v in errors.items()])}")
+            logger.info(f"  Relative errors: {', '.join([f'{k}={v:+.1f}%' for k, v in relative_errors.items()])}")
+
+        except Exception as e:
+            logger.debug(f"Could not compute detailed statistics: {e}")
+
+        return study.best_params, study.best_value
     
     def _suggest_params(self, trial: optuna.Trial, data: VariantDataset) -> Dict[str, Any]:
         """Suggest filtering parameters based on data distribution."""
@@ -466,16 +505,16 @@ class OptimisationPipeline:
 
             # Use optimization type from configuration
             if col_config.optimisation == 'minimum':
-                # suggest miniimum threshold (values below this are filtered)
+                # Keep LOW values: suggest maximum threshold (filter out values above this)
                 lower = col_data.quantile(0.1)
                 upper = col_data.max()
                 if col_config.dtype == 'int':
-                    params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower), int(upper))
+                    params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower), int(upper))
                 else:
-                    params[f'min_{col}'] = trial.suggest_float(f'min_{col}', float(lower), float(upper))
+                    params[f'max_{col}'] = trial.suggest_float(f'max_{col}', float(lower), float(upper))
 
             elif col_config.optimisation == 'maximum':
-                # suggest maximum threshold (values above this are filtered)
+                # Keep HIGH values: suggest minimum threshold (filter out values below this)
                 lower = col_data.min()
                 upper = col_data.quantile(0.9)
                 if col_config.dtype == 'int':
@@ -484,20 +523,45 @@ class OptimisationPipeline:
                     params[f'min_{col}'] = trial.suggest_float(f'min_{col}', float(lower), float(upper))
 
             elif col_config.optimisation == 'range':
-                # Range: suggest both min and max within the constraint bounds
+                # Range: handle symmetric vs regular range constraints
                 if col_config.range_constraint:
-                    lower_bound = col_config.range_constraint.min
-                    upper_bound = col_config.range_constraint.max
+                    # Check if it's a symmetric range constraint (has 'lower' and 'scale')
+                    if hasattr(col_config.range_constraint, 'lower') and hasattr(col_config.range_constraint, 'scale'):
+                        # Symmetric range: suggest only lower, calculate upper as scale - lower
+                        lower_bound = col_config.range_constraint.lower
+                        upper_bound = col_config.range_constraint.scale - col_config.range_constraint.lower
+
+                        if col_config.dtype == 'int':
+                            suggested_lower = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
+                        else:
+                            suggested_lower = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
+
+                        # Calculate symmetric upper bound
+                        suggested_upper = col_config.range_constraint.scale - suggested_lower
+                        params[f'min_{col}'] = suggested_lower
+                        params[f'max_{col}'] = suggested_upper
+                    else:
+                        # Regular range: suggest both min and max independently
+                        lower_bound = col_config.range_constraint.min
+                        upper_bound = col_config.range_constraint.max
+
+                        if col_config.dtype == 'int':
+                            params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
+                            params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower_bound), int(upper_bound))
+                        else:
+                            params[f'min_{col}'] = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
+                            params[f'max_{col}'] = trial.suggest_float(f'max_{col}', float(lower_bound), float(upper_bound))
                 else:
+                    # No constraint: use data bounds
                     lower_bound = col_data.min()
                     upper_bound = col_data.max()
 
-                if col_config.dtype == 'int':
-                    params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
-                    params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower_bound), int(upper_bound))
-                else:
-                    params[f'min_{col}'] = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
-                    params[f'max_{col}'] = trial.suggest_float(f'max_{col}', float(lower_bound), float(upper_bound))
+                    if col_config.dtype == 'int':
+                        params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
+                        params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower_bound), int(upper_bound))
+                    else:
+                        params[f'min_{col}'] = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
+                        params[f'max_{col}'] = trial.suggest_float(f'max_{col}', float(lower_bound), float(upper_bound))
 
         # Handle linked columns - copy first column's value to linked columns
         for group in linked_groups:
@@ -518,5 +582,8 @@ class OptimisationPipeline:
                     for linked_col in group[1:]:
                         linked_key = f'{prefix}_{linked_col.name}'
                         params[linked_key] = param_value
+
+        # Add tunable intercept weight for regression objective
+        params['intercept_weight'] = trial.suggest_float('intercept_weight', 0.01, 0.1)
 
         return params

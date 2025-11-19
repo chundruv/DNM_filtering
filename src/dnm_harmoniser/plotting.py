@@ -3,6 +3,8 @@
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
+import numpy as np
+import statsmodels.formula.api as smf
 from pathlib import Path
 from typing import Dict, Any, Optional
 import logging
@@ -103,22 +105,43 @@ def plot_optimization_results(
             filt_ages = filtered_data[['SAMPLE', age_col]].drop_duplicates().set_index('SAMPLE')
             plot_data_filt = filt_ages.join(filt_counts, how='left').fillna(0)
 
-            # Plotting
+            # Plot scatter points only (no automatic regression lines)
             if len(plot_data_ref) > 0:
-                sns.regplot(
-                    data=plot_data_ref, x=age_col, y='dnm_count',
-                    label='Reference (deCODE)', color='royalblue', ax=ax,
-                    scatter_kws={'alpha': 0.6, 's': 40, 'edgecolor': 'w'},
-                    line_kws={'linewidth': 2}
+                ax.scatter(
+                    plot_data_ref[age_col], plot_data_ref['dnm_count'],
+                    label='Reference (deCODE)', color='royalblue',
+                    alpha=0.6, s=40, edgecolor='w'
                 )
 
             if len(plot_data_filt) > 0:
-                sns.regplot(
-                    data=plot_data_filt, x=age_col, y='dnm_count',
-                    label='Filtered Data', color='darkorange', ax=ax,
-                    scatter_kws={'alpha': 0.7, 's': 40, 'edgecolor': 'w'},
-                    line_kws={'linewidth': 2}
+                ax.scatter(
+                    plot_data_filt[age_col], plot_data_filt['dnm_count'],
+                    label='Filtered Data', color='darkorange',
+                    alpha=0.7, s=40, edgecolor='w'
                 )
+
+            # Fit and plot actual regression lines using the coefficients
+            # Fit reference regression
+            if len(plot_data_ref) > 0:
+                try:
+                    ref_model = smf.ols(f'dnm_count ~ {age_col}', data=plot_data_ref).fit()
+                    age_range = np.linspace(plot_data_ref[age_col].min(), plot_data_ref[age_col].max(), 100)
+                    ref_pred = ref_model.params['Intercept'] + ref_model.params[age_col] * age_range
+                    ax.plot(age_range, ref_pred, color='royalblue', linewidth=2.5,
+                           label=f'Reference fit (slope={ref_model.params[age_col]:.3f})')
+                except:
+                    pass
+
+            # Fit filtered data regression
+            if len(plot_data_filt) > 0:
+                try:
+                    filt_model = smf.ols(f'dnm_count ~ {age_col}', data=plot_data_filt).fit()
+                    age_range = np.linspace(plot_data_filt[age_col].min(), plot_data_filt[age_col].max(), 100)
+                    filt_pred = filt_model.params['Intercept'] + filt_model.params[age_col] * age_range
+                    ax.plot(age_range, filt_pred, color='darkorange', linewidth=2.5,
+                           label=f'Filtered fit (slope={filt_model.params[age_col]:.3f})')
+                except:
+                    pass
 
             # Formatting
             ax.set_title(f'{var_type}s', fontsize=16, fontweight='bold')
@@ -133,7 +156,7 @@ def plot_optimization_results(
     if output_dir:
         plot_path = output_dir / 'optimization_results.png'
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        logger.info(f"Saved plot to {plot_path}")
+        logger.debug(f"Saved plot to {plot_path}")
 
     # Close figure to free memory (don't display)
     plt.close()
@@ -143,7 +166,7 @@ def plot_optimization_results(
         all_filtered_df = pd.concat(all_filtered_variants, ignore_index=True)
         output_file = output_dir / 'filtered_variants.tsv'
         all_filtered_df.to_csv(output_file, sep='\t', index=False)
-        logger.info(f"Saved {len(all_filtered_df)} filtered variants to {output_file}")
+        logger.debug(f"Saved {len(all_filtered_df)} filtered variants to {output_file}")
 
         # Save summary statistics
         summary_file = output_dir / 'filter_summary.txt'
@@ -167,7 +190,7 @@ def plot_optimization_results(
                         f.write(f"    {param}: {value}\n")
                     f.write("\n")
 
-        logger.info(f"Saved summary to {summary_file}")
+        logger.debug(f"Saved summary to {summary_file}")
 
 
 def apply_filters_from_params(
@@ -248,4 +271,4 @@ def save_parameters(
 
             f.write("\n")
 
-    logger.info(f"Saved parameters to {output_file}")
+    logger.debug(f"Saved parameters to {output_file}")
