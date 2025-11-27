@@ -261,8 +261,8 @@ class OptimisationConfig(BaseModel):
         default_factory=list,
         description="Column configurations with types and optimisation criteria"
     )
-    regression_formula: str = "dnm_count ~ paternal_age + maternal_age"
-    regression_weights: List[float] = [1.0, 1.0, 1.0]
+    regression_formula: str = "dnm_count ~ paternal_age"
+    regression_weights: List[float] = [1.0, 1.0]
 
     @model_validator(mode='after')
     def validate_linked_columns(self):
