@@ -233,7 +233,8 @@ class OptimisationPipeline:
                         data.filter_by_type(var_type),
                         targets[var_type],
                         self.config.stage1.n_trials,
-                        f"warmup_{var_type}"
+                        f"warmup_{var_type}",
+                        var_type
                     )
                     futures[var_type] = future
 
@@ -248,7 +249,8 @@ class OptimisationPipeline:
                     data.filter_by_type(var_type),
                     targets[var_type],
                     self.config.stage1.n_trials,
-                    f"warmup_{var_type}"
+                    f"warmup_{var_type}",
+                    var_type
                 )
                 if params:
                     warmup_params[var_type] = params
@@ -325,6 +327,7 @@ class OptimisationPipeline:
                 targets[var_type],
                 self.config.stage3.n_trials,
                 f"final_{var_type}",
+                var_type,
                 use_pruning=self.config.stage3.pruner is not None
             )
             if params:
@@ -339,9 +342,18 @@ class OptimisationPipeline:
         targets: np.ndarray,
         n_trials: int,
         study_name: str,
+        var_type: str,
         use_pruning: bool = False
     ) -> Tuple[Optional[Dict[str, Any]], float]:
         """Optimize filtering parameters for one variant type.
+
+        Args:
+            data: Variant dataset (already filtered by type)
+            targets: Target regression coefficients
+            n_trials: Number of optimization trials
+            study_name: Name for the optimization study
+            var_type: Variant type being optimized (SNV, Insertion, Deletion)
+            use_pruning: Whether to use pruning
 
         Returns:
             Tuple of (best_params, best_score). If optimization fails, returns (None, inf).
@@ -355,7 +367,7 @@ class OptimisationPipeline:
         
         def objective(trial):
             # Suggest parameters based on data distribution
-            params = self._suggest_params(trial, data)
+            params = self._suggest_params(trial, data, var_type)
             
             # Apply filters
             filtered = data.apply_filters(params)
@@ -474,12 +486,26 @@ class OptimisationPipeline:
 
         return study.best_params, study.best_value
     
-    def _suggest_params(self, trial: optuna.Trial, data: VariantDataset) -> Dict[str, Any]:
-        """Suggest filtering parameters based on data distribution."""
+    def _suggest_params(
+        self,
+        trial: optuna.Trial,
+        data: VariantDataset,
+        var_type: str
+    ) -> Dict[str, Any]:
+        """Suggest filtering parameters based on data distribution.
+
+        Args:
+            trial: Optuna trial for suggesting parameters
+            data: Variant dataset (already filtered by type)
+            var_type: Variant type being optimized (SNV, Insertion, Deletion)
+
+        Returns:
+            Dictionary of suggested filter parameters
+        """
         params = {}
 
-        # Get columns to optimize from configuration
-        opt_columns = self.config.optimisation.get_optimisation_columns()
+        # Get columns to optimize for this specific variant type
+        opt_columns = self.config.optimisation.get_optimisation_columns_for_variant_type(var_type)
         if not opt_columns:
             return params
 
