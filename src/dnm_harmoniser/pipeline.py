@@ -374,16 +374,28 @@ class OptimisationPipeline:
                 model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
                 model_params = model.params.values
 
-                # Calculate weighted mean squared RELATIVE error
-                # This treats percentage deviations equally across variant types
-                # regardless of coefficient magnitude
-                relative_errors = (model_params - targets) / (np.abs(targets) + 1e-10)
-                squared_relative_errors = relative_errors ** 2
+                # Calculate weighted mean squared error with hybrid metric
+                # For small coefficients (|target| < 0.1), use absolute error
+                # For large coefficients, use relative error
+                # This prevents small coefficients from dominating the loss
+
+                absolute_errors = model_params - targets
+                errors = []
+                for abs_err, target in zip(absolute_errors, targets):
+                    if np.abs(target) < 0.1:
+                        # Use absolute error for small coefficients (like insertion slopes)
+                        errors.append(abs_err ** 2)
+                    else:
+                        # Use relative error for large coefficients (like intercepts and SNV slopes)
+                        rel_err = abs_err / (np.abs(target) + 1e-10)
+                        errors.append(rel_err ** 2)
+
+                errors = np.array(errors)
 
                 # Use intercept_weight for intercept, 1.0 for other coefficients
                 intercept_weight = params.get('intercept_weight', 1.0)
-                weights = [intercept_weight] + [1.0] * (len(squared_relative_errors) - 1)
-                weighted_errors = squared_relative_errors * weights[:len(squared_relative_errors)]
+                weights = [intercept_weight] + [1.0] * (len(errors) - 1)
+                weighted_errors = errors * weights[:len(errors)]
                 msre = np.mean(weighted_errors)
 
                 # Report for pruning if enabled
@@ -604,6 +616,7 @@ class OptimisationPipeline:
                         params[linked_key] = param_value
 
         # Add tunable intercept weight for regression objective
-        params['intercept_weight'] = trial.suggest_float('intercept_weight', 0.01, 0.1)
+        # Higher weights (0.5-2.0) give intercept more importance relative to slope
+        params['intercept_weight'] = trial.suggest_float('intercept_weight', 0.5, 2.0)
 
         return params
