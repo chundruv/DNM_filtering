@@ -35,7 +35,10 @@ class OptimisationResult:
         lines = ["Optimisation Results:"]
         for var_type, params in self.best_params.items():
             lines.append(f"\n{var_type}:")
-            lines.append(f"  Best score: {self.best_scores.get(var_type, 0):.4f}")
+            score = self.best_scores.get(var_type, 0)
+            # Use scientific notation for very small scores
+            score_str = f"{score:.4e}" if score < 0.01 else f"{score:.4f}"
+            lines.append(f"  Best score: {score_str}")
             for param, value in params.items():
                 if isinstance(value, float):
                     lines.append(f"  {param}: {value:.4f}")
@@ -374,28 +377,16 @@ class OptimisationPipeline:
                 model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
                 model_params = model.params.values
 
-                # Calculate weighted mean squared error with hybrid metric
-                # For small coefficients (|target| < 0.1), use absolute error
-                # For large coefficients, use relative error
-                # This prevents small coefficients from dominating the loss
-
-                absolute_errors = model_params - targets
-                errors = []
-                for abs_err, target in zip(absolute_errors, targets):
-                    if np.abs(target) < 0.1:
-                        # Use absolute error for small coefficients (like insertion slopes)
-                        errors.append(abs_err ** 2)
-                    else:
-                        # Use relative error for large coefficients (like intercepts and SNV slopes)
-                        rel_err = abs_err / (np.abs(target) + 1e-10)
-                        errors.append(rel_err ** 2)
-
-                errors = np.array(errors)
+                # Calculate weighted mean squared RELATIVE error
+                # Using relative error keeps errors scaled appropriately across different coefficient magnitudes
+                relative_errors = (model_params - targets) / (np.abs(targets) + 1e-10)
+                squared_relative_errors = relative_errors ** 2
 
                 # Use intercept_weight for intercept, 1.0 for other coefficients
+                # Higher intercept_weight (0.5-2.0) gives more importance to matching the intercept
                 intercept_weight = params.get('intercept_weight', 1.0)
-                weights = [intercept_weight] + [1.0] * (len(errors) - 1)
-                weighted_errors = errors * weights[:len(errors)]
+                weights = [intercept_weight] + [1.0] * (len(squared_relative_errors) - 1)
+                weighted_errors = squared_relative_errors * weights[:len(squared_relative_errors)]
                 msre = np.mean(weighted_errors)
 
                 # Report for pruning if enabled
@@ -445,7 +436,9 @@ class OptimisationPipeline:
             n_jobs=1 if self.config.deterministic else self.config.max_workers
         )
         
-        logger.info(f"Optimisation for {study_name} finished. Best score: {study.best_value:.6f}")
+        # Use scientific notation for very small scores
+        score_str = f"{study.best_value:.4e}" if study.best_value < 0.01 else f"{study.best_value:.6f}"
+        logger.info(f"Optimisation for {study_name} finished. Best score: {score_str}")
 
         # Add detailed logging about the best trial
         try:
@@ -616,7 +609,7 @@ class OptimisationPipeline:
                         params[linked_key] = param_value
 
         # Add tunable intercept weight for regression objective
-        # Higher weights (0.5-2.0) give intercept more importance relative to slope
-        params['intercept_weight'] = trial.suggest_float('intercept_weight', 0.5, 2.0)
+        # Range 0.01-0.5 gives more flexibility than original 0.01-0.1
+        params['intercept_weight'] = trial.suggest_float('intercept_weight', 0.01, 0.5)
 
         return params
