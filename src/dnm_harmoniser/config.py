@@ -195,6 +195,10 @@ class ColumnConfig(BaseModel):
         None,
         description="Variant types this column applies to. If None, applies to all variant types."
     )
+    computed: bool = Field(
+        False,
+        description="If True, this column is computed (e.g., indel length from REF/ALT) and not present in raw input. Parameter bounds must be explicitly specified via range_constraint."
+    )
 
     @model_validator(mode='after')
     def validate_range_constraint(self):
@@ -206,6 +210,8 @@ class ColumnConfig(BaseModel):
             raise ValueError(f"Metadata columns (optimisation='none') cannot be linked to other columns for column '{self.name}'")
         if self.variant_types is not None and len(self.variant_types) == 0:
             raise ValueError(f"variant_types must contain at least one variant type if specified for column '{self.name}'")
+        if self.computed and self.range_constraint is None and self.optimisation != "none":
+            raise ValueError(f"Computed columns must have explicit range_constraint for bounds (column '{self.name}')")
         return self
 
 

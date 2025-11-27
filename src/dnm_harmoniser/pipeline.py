@@ -504,18 +504,35 @@ class OptimisationPipeline:
             if col in skip_columns:
                 continue
 
-            if col not in data.variants.columns:
+            # For computed columns, bounds must come from range_constraint
+            # For non-computed columns, check if column exists in data
+            if not col_config.computed and col not in data.variants.columns:
                 continue
 
-            col_data = pd.to_numeric(data.variants[col], errors='coerce').dropna()
-            if len(col_data) == 0:
-                continue
+            # Get data bounds for non-computed columns
+            # For computed columns, we'll use explicit bounds from range_constraint
+            if not col_config.computed:
+                col_data = pd.to_numeric(data.variants[col], errors='coerce').dropna()
+                if len(col_data) == 0:
+                    continue
+            else:
+                col_data = None  # Not used for computed columns
 
             # Use optimization type from configuration
             if col_config.optimisation == 'minimum':
                 # Keep LOW values: suggest maximum threshold (filter out values above this)
-                lower = col_data.quantile(0.1)
-                upper = col_data.max()
+                if col_config.computed:
+                    # For computed columns, use explicit bounds from range_constraint
+                    if not col_config.range_constraint:
+                        logger.warning(f"Skipping computed column {col}: no range_constraint specified")
+                        continue
+                    lower = col_config.range_constraint.min
+                    upper = col_config.range_constraint.max
+                else:
+                    # For regular columns, use data quantiles
+                    lower = col_data.quantile(0.1)
+                    upper = col_data.max()
+
                 if col_config.dtype == 'int' and not is_cmaes:
                     params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower), int(upper))
                 else:
@@ -525,8 +542,18 @@ class OptimisationPipeline:
 
             elif col_config.optimisation == 'maximum':
                 # Keep HIGH values: suggest minimum threshold (filter out values below this)
-                lower = col_data.min()
-                upper = col_data.quantile(0.9)
+                if col_config.computed:
+                    # For computed columns, use explicit bounds from range_constraint
+                    if not col_config.range_constraint:
+                        logger.warning(f"Skipping computed column {col}: no range_constraint specified")
+                        continue
+                    lower = col_config.range_constraint.min
+                    upper = col_config.range_constraint.max
+                else:
+                    # For regular columns, use data quantiles
+                    lower = col_data.min()
+                    upper = col_data.quantile(0.9)
+
                 if col_config.dtype == 'int' and not is_cmaes:
                     params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower), int(upper))
                 else:

@@ -87,16 +87,30 @@ optimisation:
       variant_types:
         - SNV
 
-    # Indel-only: indel length (only for insertions and deletions)
-    - name: indel_length
+    # Computed column: indel length (calculated from REF/ALT)
+    # For insertions: length is positive (ALT longer than REF)
+    # For deletions: length is negative (REF longer than ALT)
+    # Example: filter insertions to keep length 1-20
+    - name: length
       dtype: int
       optimisation: range
       range_constraint:
         min: 1
-        max: 50
+        max: 20
       variant_types:
         - Insertion
+      computed: true  # This column is calculated from REF/ALT, not in raw input
+
+    # Example: filter deletions to keep length -20 to -1
+    - name: length
+      dtype: int
+      optimisation: range
+      range_constraint:
+        min: -20
+        max: -1
+      variant_types:
         - Deletion
+      computed: true  # This column is calculated from REF/ALT, not in raw input
 
     # Deletion-only: homopolymer length
     - name: homopolymer_length
