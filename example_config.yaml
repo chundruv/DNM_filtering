@@ -117,8 +117,8 @@ optimisation:
       optimisation: maximum
       linked_to: depth_father
 
-  regression_formula: "dnm_count ~ paternal_age + maternal_age"
-  regression_weights: [1.0, 1.0, 1.0]
+  regression_formula: "dnm_count ~ paternal_age"
+  regression_weights: [1.0, 1.0]
 
 # Performance settings
 max_workers: 4

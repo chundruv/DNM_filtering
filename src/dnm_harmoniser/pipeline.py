@@ -478,6 +478,9 @@ class OptimisationPipeline:
         if not opt_columns:
             return params
 
+        # Check if using CMA-ES sampler (doesn't support discrete parameters)
+        is_cmaes = self.config.stage3.sampler == 'cmaes'
+
         # Build set of columns that are linked (not the first in their group)
         # These should NOT be suggested independently
         linked_groups = self.config.optimisation.get_linked_column_groups()
@@ -508,19 +511,23 @@ class OptimisationPipeline:
                 # Keep LOW values: suggest maximum threshold (filter out values above this)
                 lower = col_data.quantile(0.1)
                 upper = col_data.max()
-                if col_config.dtype == 'int':
+                if col_config.dtype == 'int' and not is_cmaes:
                     params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower), int(upper))
                 else:
-                    params[f'max_{col}'] = trial.suggest_float(f'max_{col}', float(lower), float(upper))
+                    # Use float for CMA-ES or if dtype is float
+                    value = trial.suggest_float(f'max_{col}', float(lower), float(upper))
+                    params[f'max_{col}'] = int(round(value)) if col_config.dtype == 'int' else value
 
             elif col_config.optimisation == 'maximum':
                 # Keep HIGH values: suggest minimum threshold (filter out values below this)
                 lower = col_data.min()
                 upper = col_data.quantile(0.9)
-                if col_config.dtype == 'int':
+                if col_config.dtype == 'int' and not is_cmaes:
                     params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower), int(upper))
                 else:
-                    params[f'min_{col}'] = trial.suggest_float(f'min_{col}', float(lower), float(upper))
+                    # Use float for CMA-ES or if dtype is float
+                    value = trial.suggest_float(f'min_{col}', float(lower), float(upper))
+                    params[f'min_{col}'] = int(round(value)) if col_config.dtype == 'int' else value
 
             elif col_config.optimisation == 'range':
                 # Range: handle symmetric vs regular range constraints
@@ -531,10 +538,11 @@ class OptimisationPipeline:
                         lower_bound = col_config.range_constraint.lower
                         upper_bound = col_config.range_constraint.scale - col_config.range_constraint.lower
 
-                        if col_config.dtype == 'int':
+                        if col_config.dtype == 'int' and not is_cmaes:
                             suggested_lower = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
                         else:
-                            suggested_lower = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
+                            value = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
+                            suggested_lower = int(round(value)) if col_config.dtype == 'int' else value
 
                         # Calculate symmetric upper bound
                         suggested_upper = col_config.range_constraint.scale - suggested_lower
@@ -545,23 +553,35 @@ class OptimisationPipeline:
                         lower_bound = col_config.range_constraint.min
                         upper_bound = col_config.range_constraint.max
 
-                        if col_config.dtype == 'int':
+                        if col_config.dtype == 'int' and not is_cmaes:
                             params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
                             params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower_bound), int(upper_bound))
                         else:
-                            params[f'min_{col}'] = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
-                            params[f'max_{col}'] = trial.suggest_float(f'max_{col}', float(lower_bound), float(upper_bound))
+                            value_min = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
+                            value_max = trial.suggest_float(f'max_{col}', float(lower_bound), float(upper_bound))
+                            if col_config.dtype == 'int':
+                                params[f'min_{col}'] = int(round(value_min))
+                                params[f'max_{col}'] = int(round(value_max))
+                            else:
+                                params[f'min_{col}'] = value_min
+                                params[f'max_{col}'] = value_max
                 else:
                     # No constraint: use data bounds
                     lower_bound = col_data.min()
                     upper_bound = col_data.max()
 
-                    if col_config.dtype == 'int':
+                    if col_config.dtype == 'int' and not is_cmaes:
                         params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
                         params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower_bound), int(upper_bound))
                     else:
-                        params[f'min_{col}'] = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
-                        params[f'max_{col}'] = trial.suggest_float(f'max_{col}', float(lower_bound), float(upper_bound))
+                        value_min = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
+                        value_max = trial.suggest_float(f'max_{col}', float(lower_bound), float(upper_bound))
+                        if col_config.dtype == 'int':
+                            params[f'min_{col}'] = int(round(value_min))
+                            params[f'max_{col}'] = int(round(value_max))
+                        else:
+                            params[f'min_{col}'] = value_min
+                            params[f'max_{col}'] = value_max
 
         # Handle linked columns - copy first column's value to linked columns
         for group in linked_groups:
