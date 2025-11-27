@@ -9,3 +9,6 @@ typer>=0.9.0
 joblib>=1.3.0
 matplotlib>=3.7.0
 seaborn>=0.12.0
+
+# Optional: CMA-ES sampler for Optuna (required if using sampler: cmaes)
+cmaes>=0.10.0
