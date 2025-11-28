@@ -390,14 +390,15 @@ class OptimisationPipeline:
                 model_params = model.params.values
 
                 # Calculate weighted mean squared RELATIVE error
-                # Use relative error for all coefficients to keep them scale-independent
-                # Use larger epsilon (0.01) to prevent division issues with near-zero targets
-                relative_errors = (model_params - targets) / (np.abs(targets) + 0.01)
+                # Use relative error with tiny epsilon to avoid division by zero
+                # For small coefficients (insertions ~0.02), this creates large relative errors
+                # which is actually CORRECT - small errors matter more for small coefficients!
+                relative_errors = (model_params - targets) / (np.abs(targets) + 1e-10)
                 squared_relative_errors = relative_errors ** 2
 
                 # Use intercept_weight for intercept, 1.0 for slope
-                # intercept_weight < 1.0 gives LESS importance to intercept (focuses on slope)
-                # intercept_weight > 1.0 gives MORE importance to intercept
+                # SMALLER intercept_weight = focus on matching slope accurately
+                # intercept_weight ~0.1 = prioritize slope matching 10x over intercept
                 intercept_weight = params.get('intercept_weight', 1.0)
                 weights = [intercept_weight] + [1.0] * (len(squared_relative_errors) - 1)
                 weighted_errors = squared_relative_errors * weights[:len(squared_relative_errors)]
@@ -664,7 +665,8 @@ class OptimisationPipeline:
                         params[linked_key] = param_value
 
         # Add tunable intercept weight for regression objective
-        # Range 0.3-2.0 allows optimizer to balance intercept vs slope importance
-        params['intercept_weight'] = trial.suggest_float('intercept_weight', 0.3, 2.0)
+        # Range 0.01-0.3: prioritize slope matching over intercept
+        # Lower values mean optimizer focuses almost entirely on matching slope
+        params['intercept_weight'] = trial.suggest_float('intercept_weight', 0.01, 0.3)
 
         return params

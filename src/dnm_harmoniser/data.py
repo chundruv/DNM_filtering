@@ -96,7 +96,8 @@ class VariantDataset:
             df['var_type'] = cls._get_var_type(df)
             df['length'] = df['ALT'].str.len() - df['REF'].str.len()
             df['abs_length'] = np.abs(df['length'])  # Absolute indel length for filtering
-            df['homopolymer_length'] = df.apply(lambda row: cls._get_homopolymer_length(row['REF'], row['ALT']), axis=1)
+            # Homopolymer calculation is slow - only enable if column is in config
+            # df['homopolymer_length'] = df.apply(lambda row: cls._get_homopolymer_length(row['REF'], row['ALT']), axis=1)
             df = df[df['abs_length'] < max_length]
         
         # Calculate midparage if parental ages exist
