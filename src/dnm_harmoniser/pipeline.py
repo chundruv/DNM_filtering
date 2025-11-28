@@ -389,36 +389,27 @@ class OptimisationPipeline:
                 model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
                 model_params = model.params.values
 
-                # Calculate weighted mean squared error using hybrid approach
-                # For coefficients with small absolute values, use absolute error
-                # For larger coefficients, use relative error to keep them scaled
-                threshold = 0.1
-                errors = []
-                for fitted, target in zip(model_params, targets):
-                    if np.abs(target) < threshold:
-                        # Use absolute error for near-zero targets (e.g., insertion slopes)
-                        errors.append(fitted - target)
-                    else:
-                        # Use relative error for larger targets to maintain scale independence
-                        errors.append((fitted - target) / np.abs(target))
+                # Calculate weighted mean squared RELATIVE error
+                # Use relative error for all coefficients to keep them scale-independent
+                # Use larger epsilon (0.01) to prevent division issues with near-zero targets
+                relative_errors = (model_params - targets) / (np.abs(targets) + 0.01)
+                squared_relative_errors = relative_errors ** 2
 
-                errors = np.array(errors)
-                squared_errors = errors ** 2
-
-                # Use intercept_weight for intercept, 1.0 for other coefficients
-                # Higher intercept_weight (0.5-2.0) gives more importance to matching the intercept
+                # Use intercept_weight for intercept, 1.0 for slope
+                # intercept_weight < 1.0 gives LESS importance to intercept (focuses on slope)
+                # intercept_weight > 1.0 gives MORE importance to intercept
                 intercept_weight = params.get('intercept_weight', 1.0)
-                weights = [intercept_weight] + [1.0] * (len(squared_errors) - 1)
-                weighted_errors = squared_errors * weights[:len(squared_errors)]
-                mse = np.mean(weighted_errors)
+                weights = [intercept_weight] + [1.0] * (len(squared_relative_errors) - 1)
+                weighted_errors = squared_relative_errors * weights[:len(squared_relative_errors)]
+                msre = np.mean(weighted_errors)
 
                 # Report for pruning if enabled
                 if use_pruning and trial.number > 0:
-                    trial.report(mse, trial.number)
+                    trial.report(msre, trial.number)
                     if trial.should_prune():
                         raise optuna.TrialPruned()
 
-                return mse
+                return msre
 
             except Exception as e:
                 # Log detailed error information
@@ -673,7 +664,7 @@ class OptimisationPipeline:
                         params[linked_key] = param_value
 
         # Add tunable intercept weight for regression objective
-        # Range 0.5-1.5 balances intercept and slope matching
-        params['intercept_weight'] = trial.suggest_float('intercept_weight', 0.5, 1.5)
+        # Range 0.3-2.0 allows optimizer to balance intercept vs slope importance
+        params['intercept_weight'] = trial.suggest_float('intercept_weight', 0.3, 2.0)
 
         return params
