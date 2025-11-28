@@ -91,15 +91,13 @@ optimisation:
     # Filter insertions and deletions by magnitude (absolute length)
     # optimisation: minimum means "keep small values, filter large values"
     # This suggests max_abs_length parameter - optimizer will find best cutoff
+    # Applied globally so insertions and deletions use the SAME threshold
     - name: abs_length
       dtype: int
       optimisation: minimum
       range_constraint:
         min: 1
         max: 50
-      variant_types:
-        - Insertion
-        - Deletion
       computed: true  # This column is calculated from REF/ALT, not in raw input
 
     # Deletion-only: homopolymer length

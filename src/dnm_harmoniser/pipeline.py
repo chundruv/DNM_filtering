@@ -673,7 +673,7 @@ class OptimisationPipeline:
                         params[linked_key] = param_value
 
         # Add tunable intercept weight for regression objective
-        # Range 0.5-2.0 gives more importance to matching the intercept
-        params['intercept_weight'] = trial.suggest_float('intercept_weight', 0.5, 2.0)
+        # Range 0.5-1.5 balances intercept and slope matching
+        params['intercept_weight'] = trial.suggest_float('intercept_weight', 0.5, 1.5)
 
         return params
