@@ -204,7 +204,7 @@ class ColumnConfig(BaseModel):
     def validate_range_constraint(self):
         if self.optimisation == "range" and self.range_constraint is None:
             raise ValueError(f"range_constraint is required when optimisation='range' for column '{self.name}'")
-        if self.optimisation != "range" and self.range_constraint is not None:
+        if self.optimisation != "range" and self.range_constraint is not None and not self.computed:
             raise ValueError(f"range_constraint should only be set when optimisation='range' for column '{self.name}'")
         if self.optimisation == "none" and self.linked_to is not None:
             raise ValueError(f"Metadata columns (optimisation='none') cannot be linked to other columns for column '{self.name}'")
