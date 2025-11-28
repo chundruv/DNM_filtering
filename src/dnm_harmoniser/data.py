@@ -98,7 +98,8 @@ class VariantDataset:
             df['abs_length'] = np.abs(df['length'])  # Absolute indel length for filtering
             # Homopolymer calculation is slow - only enable if column is in config
             # df['homopolymer_length'] = df.apply(lambda row: cls._get_homopolymer_length(row['REF'], row['ALT']), axis=1)
-            df = df[df['abs_length'] < max_length]
+            # Don't filter by length at load time - let optimizer handle it
+            # df = df[df['abs_length'] < max_length]
         
         # Calculate midparage if parental ages exist
         if 'paternal_age' in df.columns and 'maternal_age' in df.columns:
