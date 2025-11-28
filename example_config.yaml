@@ -87,28 +87,18 @@ optimisation:
       variant_types:
         - SNV
 
-    # Computed column: indel length (calculated from REF/ALT)
-    # For insertions: length is positive (ALT longer than REF)
-    # For deletions: length is negative (REF longer than ALT)
-    # Example: filter insertions to keep length 1-20
-    - name: length
+    # Computed column: absolute indel length (calculated from REF/ALT)
+    # Filter insertions and deletions by magnitude (absolute length)
+    # optimisation: minimum means "keep small values, filter large values"
+    # This suggests max_abs_length parameter - optimizer will find best cutoff
+    - name: abs_length
       dtype: int
-      optimisation: range
+      optimisation: minimum
       range_constraint:
         min: 1
-        max: 20
+        max: 50
       variant_types:
         - Insertion
-      computed: true  # This column is calculated from REF/ALT, not in raw input
-
-    # Example: filter deletions to keep length -20 to -1
-    - name: length
-      dtype: int
-      optimisation: range
-      range_constraint:
-        min: -20
-        max: -1
-      variant_types:
         - Deletion
       computed: true  # This column is calculated from REF/ALT, not in raw input
 
