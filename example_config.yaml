@@ -100,12 +100,18 @@ optimisation:
         max: 50
       computed: true  # This column is calculated from REF/ALT, not in raw input
 
-    # Deletion-only: homopolymer length
+    # Deletion-only: homopolymer length (longest run of repeated nucleotides)
+    # Calculated from REF/ALT sequences - longer homopolymers indicate likely real variants
+    # optimisation: maximum means "keep high values" - real deletions often in repetitive regions
     - name: homopolymer_length
       dtype: int
       optimisation: maximum
+      range_constraint:
+        min: 1
+        max: 20
       variant_types:
         - Deletion
+      computed: true  # Calculated from REF/ALT sequences
 
     # Linked columns (share the same threshold)
     # Useful for father/mother depth that should have the same minimum

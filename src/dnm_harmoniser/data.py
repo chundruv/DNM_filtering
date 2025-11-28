@@ -91,11 +91,12 @@ class VariantDataset:
                     df.rename(columns={old: 'ALT'}, inplace=True)
                     break
         
-        # Calculate variant type
+        # Calculate variant type and derived metrics
         if 'REF' in df.columns and 'ALT' in df.columns:
             df['var_type'] = cls._get_var_type(df)
             df['length'] = df['ALT'].str.len() - df['REF'].str.len()
             df['abs_length'] = np.abs(df['length'])  # Absolute indel length for filtering
+            df['homopolymer_length'] = df.apply(lambda row: cls._get_homopolymer_length(row['REF'], row['ALT']), axis=1)
             df = df[df['abs_length'] < max_length]
         
         # Calculate midparage if parental ages exist
@@ -129,15 +130,67 @@ class VariantDataset:
         """Vectorized variant type detection."""
         ref_len = df['REF'].str.len()
         alt_len = df['ALT'].str.len()
-        
+
         conditions = [
             (ref_len == 1) & (alt_len == 1),
             ref_len > alt_len,
             ref_len < alt_len
         ]
         choices = ['SNV', 'Deletion', 'Insertion']
-        
+
         return pd.Series(np.select(conditions, choices, default='Other'), index=df.index)
+
+    @staticmethod
+    def _get_homopolymer_length(ref: str, alt: str) -> int:
+        """
+        Calculate the length of the longest homopolymer (repeated nucleotide) in REF or ALT.
+
+        For deletions: checks the deleted sequence (REF - ALT)
+        For insertions: checks the inserted sequence (ALT - REF)
+        For SNVs: returns 1 (single nucleotide)
+
+        Parameters
+        ----------
+        ref : str
+            Reference allele sequence
+        alt : str
+            Alternate allele sequence
+
+        Returns
+        -------
+        int
+            Length of longest homopolymer run
+        """
+        if not isinstance(ref, str) or not isinstance(alt, str):
+            return 0
+
+        ref = ref.upper()
+        alt = alt.upper()
+
+        # For SNVs, homopolymer length is 1
+        if len(ref) == 1 and len(alt) == 1:
+            return 1
+
+        # For indels, check the longer sequence (contains the repetitive region)
+        seq_to_check = ref if len(ref) > len(alt) else alt
+
+        if len(seq_to_check) == 0:
+            return 0
+
+        # Find longest run of repeated nucleotides
+        max_length = 1
+        current_length = 1
+        current_base = seq_to_check[0]
+
+        for base in seq_to_check[1:]:
+            if base == current_base:
+                current_length += 1
+                max_length = max(max_length, current_length)
+            else:
+                current_base = base
+                current_length = 1
+
+        return max_length
     
     def filter_by_type(self, var_type: str) -> 'VariantDataset':
         """Return new dataset filtered by variant type."""
