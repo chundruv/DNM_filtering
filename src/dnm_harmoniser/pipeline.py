@@ -76,7 +76,8 @@ class OptimisationPipeline:
         random.seed(seed)
         np.random.seed(seed)
         os.environ['PYTHONHASHSEED'] = str(seed)
-        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        # Set Optuna verbosity to INFO to see progress bars
+        optuna.logging.set_verbosity(optuna.logging.INFO)
     
     def run(
         self,
