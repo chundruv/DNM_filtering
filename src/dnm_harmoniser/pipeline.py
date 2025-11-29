@@ -40,6 +40,9 @@ class OptimisationResult:
             score_str = f"{score:.4e}" if score < 0.01 else f"{score:.4f}"
             lines.append(f"  Best score: {score_str}")
             for param, value in params.items():
+                # Skip internal parameters
+                if param == 'intercept_weight':
+                    continue
                 if isinstance(value, float):
                     lines.append(f"  {param}: {value:.4f}")
                 else:
@@ -388,30 +391,39 @@ class OptimisationPipeline:
             try:
                 # Fit regression
                 model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
-                model_params = model.params.values
+                fitted_intercept = model.params.values[0]
+                fitted_slope = model.params.values[1] if len(model.params.values) > 1 else 0
+                target_intercept = targets[0]
+                target_slope = targets[1] if len(targets) > 1 else 0
 
-                # Calculate weighted mean squared RELATIVE error
-                # Use relative error with tiny epsilon to avoid division by zero
-                # For small coefficients (insertions ~0.02), this creates large relative errors
-                # which is actually CORRECT - small errors matter more for small coefficients!
-                relative_errors = (model_params - targets) / (np.abs(targets) + 1e-10)
-                squared_relative_errors = relative_errors ** 2
+                # IMPROVED OBJECTIVE FUNCTION:
+                # 1. Slope error: relative squared error (slope matching is critical)
+                slope_rel_error = (fitted_slope - target_slope) / (np.abs(target_slope) + 1e-10)
+                slope_loss = slope_rel_error ** 2
 
-                # Use intercept_weight for intercept, 1.0 for slope
-                # SMALLER intercept_weight = focus on matching slope accurately
-                # intercept_weight ~0.1 = prioritize slope matching 10x over intercept
-                intercept_weight = params.get('intercept_weight', 1.0)
-                weights = [intercept_weight] + [1.0] * (len(squared_relative_errors) - 1)
-                weighted_errors = squared_relative_errors * weights[:len(squared_relative_errors)]
-                msre = np.mean(weighted_errors)
+                # 2. Intercept error: use absolute error normalized by target intercept
+                #    Also add asymmetric penalty - intercept being TOO HIGH is worse
+                #    (we don't want more DNMs at young ages than reference)
+                intercept_abs_error = fitted_intercept - target_intercept
+                intercept_rel_error = intercept_abs_error / (np.abs(target_intercept) + 1e-10)
+                
+                # Asymmetric penalty: if filtered intercept > target, penalty is 2x
+                if intercept_abs_error > 0:
+                    intercept_loss = (intercept_rel_error ** 2) * 2.0
+                else:
+                    intercept_loss = intercept_rel_error ** 2
+
+                # 3. Combined loss with fixed weights
+                #    Give slope 60% weight, intercept 40% weight
+                total_loss = 0.6 * slope_loss + 0.4 * intercept_loss
 
                 # Report for pruning if enabled
                 if use_pruning and trial.number > 0:
-                    trial.report(msre, trial.number)
+                    trial.report(total_loss, trial.number)
                     if trial.should_prune():
                         raise optuna.TrialPruned()
 
-                return msre
+                return total_loss
 
             except Exception as e:
                 # Log detailed error information
@@ -664,10 +676,5 @@ class OptimisationPipeline:
                     for linked_col in group[1:]:
                         linked_key = f'{prefix}_{linked_col.name}'
                         params[linked_key] = param_value
-
-        # Add tunable intercept weight for regression objective
-        # Range 0.01-0.3: prioritize slope matching over intercept
-        # Lower values mean optimizer focuses almost entirely on matching slope
-        params['intercept_weight'] = trial.suggest_float('intercept_weight', 0.01, 0.3)
 
         return params
