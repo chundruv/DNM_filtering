@@ -396,26 +396,14 @@ class OptimisationPipeline:
                 target_intercept = targets[0]
                 target_slope = targets[1] if len(targets) > 1 else 0
 
-                # IMPROVED OBJECTIVE FUNCTION:
-                # 1. Slope error: relative squared error (slope matching is critical)
+                # Calculate relative squared errors
                 slope_rel_error = (fitted_slope - target_slope) / (np.abs(target_slope) + 1e-10)
-                slope_loss = slope_rel_error ** 2
-
-                # 2. Intercept error: use absolute error normalized by target intercept
-                #    Also add asymmetric penalty - intercept being TOO HIGH is worse
-                #    (we don't want more DNMs at young ages than reference)
-                intercept_abs_error = fitted_intercept - target_intercept
-                intercept_rel_error = intercept_abs_error / (np.abs(target_intercept) + 1e-10)
+                intercept_rel_error = (fitted_intercept - target_intercept) / (np.abs(target_intercept) + 1e-10)
                 
-                # Asymmetric penalty: if filtered intercept > target, penalty is 2x
-                if intercept_abs_error > 0:
-                    intercept_loss = (intercept_rel_error ** 2) * 2.0
-                else:
-                    intercept_loss = intercept_rel_error ** 2
-
-                # 3. Combined loss with fixed weights
-                #    Give slope 60% weight, intercept 40% weight
-                total_loss = 0.6 * slope_loss + 0.4 * intercept_loss
+                # Weighted loss: prioritize slope (85%) over intercept (15%)
+                # The slope (paternal age effect) is the key biological signal
+                # Intercept is secondary and harder to match exactly
+                total_loss = 0.85 * (slope_rel_error ** 2) + 0.15 * (intercept_rel_error ** 2)
 
                 # Report for pruning if enabled
                 if use_pruning and trial.number > 0:
