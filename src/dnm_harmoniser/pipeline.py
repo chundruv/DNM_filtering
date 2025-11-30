@@ -396,14 +396,9 @@ class OptimisationPipeline:
                 target_intercept = targets[0]
                 target_slope = targets[1] if len(targets) > 1 else 0
 
-                # Calculate relative squared errors
+                # Only match slope - intercept differences may reflect genuine cohort differences
                 slope_rel_error = (fitted_slope - target_slope) / (np.abs(target_slope) + 1e-10)
-                intercept_rel_error = (fitted_intercept - target_intercept) / (np.abs(target_intercept) + 1e-10)
-                
-                # Weighted loss: prioritize slope (85%) over intercept (15%)
-                # The slope (paternal age effect) is the key biological signal
-                # Intercept is secondary and harder to match exactly
-                total_loss = 0.85 * (slope_rel_error ** 2) + 0.15 * (intercept_rel_error ** 2)
+                total_loss = slope_rel_error ** 2
 
                 # Report for pruning if enabled
                 if use_pruning and trial.number > 0:
