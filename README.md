@@ -103,24 +103,12 @@ final_params = runner.optimize(clean_data, targets, n_trials=1000)
 ## Docker
 
 ```bash
-docker build -t dnm-harmoniserr .
+docker build -t dnm-harmoniser .
 
 docker run -v $(pwd)/data:/data \
            -v $(pwd)/results:/results \
-           dnm-harmoniserr \
+           dnm-harmoniser \
            dnm-harmoniser /data/variants.tsv /data/reference.tsv
-```
-
-## Citation
-
-If you use this software, please cite:
-```
-@software{dnm_harmoniser,
-  title = {Variant Optimizer: Three-stage Bayesian optimization for genomic variant filtering},
-  author = {University of Exeter},
-  year = {2024},
-  url = {https://github.com/university-exeter/dnm-harmoniserr}
-}
 ```
 
 ## License

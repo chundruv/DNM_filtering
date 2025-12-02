@@ -272,41 +272,62 @@ class OptimisationPipeline:
         warmup_params: Dict[str, Dict[str, Any]]
     ) -> Tuple[VariantDataset, int]:
         """Stage 2: Remove outlier individuals based on filtered DNM counts."""
-        
+
+        logger.info("Applying warmup filters to count DNMs per individual...")
+
         # Apply warmup filters and count DNMs
         all_filtered = []
         for var_type, params in warmup_params.items():
             var_data = data.filter_by_type(var_type)
+            logger.info(f"  {var_type}: {len(var_data)} variants before warmup filters")
             filtered = var_data.apply_filters(params)
+            logger.info(f"  {var_type}: {len(filtered)} variants after warmup filters ({len(filtered)/len(var_data)*100:.1f}% retained)")
+            logger.info(f"  {var_type} warmup params: {params}")
             all_filtered.append(filtered.variants)
-        
+
         if not all_filtered:
+            logger.warning("No filtered variants after applying warmup filters!")
             return data, 0
-        
+
         # Combine and count total filtered DNMs per individual
         combined = pd.concat(all_filtered, ignore_index=True)
-        total_counts = combined.groupby('SAMPLE').size()
-        
-        logger.info(f"DNM count distribution: min={total_counts.min()}, "
-                   f"max={total_counts.max()}, mean={total_counts.mean():.1f}")
-        
+        total_counts = combined.groupby('SAMPLE').size().sort_values()
+
+        logger.info(f"DNM count distribution across {len(total_counts)} individuals:")
+        logger.info(f"  Min: {total_counts.min()}, Max: {total_counts.max()}, Mean: {total_counts.mean():.1f}, Median: {total_counts.median():.1f}")
+        logger.info(f"  Percentiles - 5%: {total_counts.quantile(0.05):.1f}, 95%: {total_counts.quantile(0.95):.1f}")
+
         # Determine samples to keep
         samples_to_keep = total_counts.index
-        
+        initial_count = len(samples_to_keep)
+
         if self.config.stage2.min_dnm_count:
+            samples_below_min = total_counts[total_counts < self.config.stage2.min_dnm_count]
             samples_to_keep = total_counts[total_counts >= self.config.stage2.min_dnm_count].index
-        
+            logger.info(f"Removing {len(samples_below_min)} individuals with < {self.config.stage2.min_dnm_count} DNMs")
+            if len(samples_below_min) > 0:
+                logger.info(f"  DNM counts of removed (min): {samples_below_min.tolist()}")
+
         if self.config.stage2.max_dnm_count:
+            samples_above_max = total_counts[
+                (total_counts > self.config.stage2.max_dnm_count) &
+                (total_counts.index.isin(samples_to_keep))
+            ]
             samples_to_keep = total_counts[
                 (total_counts <= self.config.stage2.max_dnm_count) &
                 (total_counts.index.isin(samples_to_keep))
             ].index
-        
-        n_removed = len(total_counts) - len(samples_to_keep)
-        
+            logger.info(f"Removing {len(samples_above_max)} individuals with > {self.config.stage2.max_dnm_count} DNMs")
+            if len(samples_above_max) > 0:
+                logger.info(f"  DNM counts of removed (max): {samples_above_max.tolist()}")
+
+        n_removed = initial_count - len(samples_to_keep)
+
         # Filter data
         filtered_variants = data.variants[data.variants['SAMPLE'].isin(samples_to_keep)].copy()
-        
+
+        logger.info(f"Outlier removal complete: kept {len(samples_to_keep)}/{initial_count} individuals")
+
         return VariantDataset(variants=filtered_variants, metadata=data.metadata), n_removed
     
     def _stage2_outliers(self, data_hash: str, warmup_hash: str) -> Tuple[str, int]:
@@ -372,20 +393,21 @@ class OptimisationPipeline:
         def objective(trial):
             # Suggest parameters based on data distribution
             params = self._suggest_params(trial, data, var_type)
-            
+
             # Apply filters
             filtered = data.apply_filters(params)
-            
+
             if len(filtered) == 0:
+                logger.debug(f"Trial {trial.number}: No variants remaining after filtering")
                 return float('inf')
-            
+
             # Count DNMs
             dnm_counts = filtered.count_by_sample().rename('dnm_count').reset_index()
             regression_data = parental_info.merge(dnm_counts, on='SAMPLE', how='left').fillna(0)
 
             # Check if we have enough data for regression
             if len(regression_data) < 3:
-                logger.debug(f"Not enough samples for regression: {len(regression_data)}")
+                logger.debug(f"Trial {trial.number}: Not enough samples for regression: {len(regression_data)}")
                 return float('inf')
 
             try:
@@ -396,9 +418,25 @@ class OptimisationPipeline:
                 target_intercept = targets[0]
                 target_slope = targets[1] if len(targets) > 1 else 0
 
-                # Only match slope - intercept differences may reflect genuine cohort differences
+                # Calculate weighted loss using regression_weights from config
+                # regression_weights[0] = intercept weight, regression_weights[1] = slope weight
+                weights = self.config.optimisation.regression_weights
+                intercept_weight = weights[0] if len(weights) > 0 else 0.1
+                slope_weight = weights[1] if len(weights) > 1 else 1.0
+
+                # Calculate relative errors for each coefficient
                 slope_rel_error = (fitted_slope - target_slope) / (np.abs(target_slope) + 1e-10)
-                total_loss = slope_rel_error ** 2
+                intercept_rel_error = (fitted_intercept - target_intercept) / (np.abs(target_intercept) + 1e-10)
+
+                # Weighted loss (squared errors)
+                total_loss = (intercept_weight * intercept_rel_error ** 2) + (slope_weight * slope_rel_error ** 2)
+
+                # Log every 10th trial for monitoring
+                if trial.number % 10 == 0:
+                    logger.debug(f"Trial {trial.number}: {len(filtered)}/{len(data)} variants retained, "
+                               f"slope={fitted_slope:.4f} (target={target_slope:.4f}, weight={slope_weight}), "
+                               f"intercept={fitted_intercept:.4f} (target={target_intercept:.4f}, weight={intercept_weight}), "
+                               f"loss={total_loss:.6f}")
 
                 # Report for pruning if enabled
                 if use_pruning and trial.number > 0:
@@ -410,7 +448,7 @@ class OptimisationPipeline:
 
             except Exception as e:
                 # Log detailed error information
-                logger.warning(f"Regression failed: {e}")
+                logger.warning(f"Trial {trial.number}: Regression failed: {e}")
                 logger.debug(f"  Regression data shape: {regression_data.shape}")
                 logger.debug(f"  DNM count range: {regression_data['dnm_count'].min()}-{regression_data['dnm_count'].max()}")
                 logger.debug(f"  Age columns present: {regression_data.columns.tolist()}")
@@ -477,6 +515,15 @@ class OptimisationPipeline:
             errors = {k: fitted_coeffs[k] - target_coeffs[k] for k in target_coeffs.keys()}
             relative_errors = {k: (fitted_coeffs[k] - target_coeffs[k]) / target_coeffs[k] * 100
                              for k in target_coeffs.keys()}
+
+            # Show optimization weights
+            weights = self.config.optimisation.regression_weights
+            weight_strs = []
+            for i, key in enumerate(model.params.index):
+                weight = weights[i] if i < len(weights) else 1.0
+                weight_strs.append(f"{key} (weight={weight})")
+            logger.info(f"  Optimization weights: {', '.join(weight_strs)}")
+
             logger.info(f"  Absolute errors: {', '.join([f'{k}={v:+.4f}' for k, v in errors.items()])}")
             logger.info(f"  Relative errors: {', '.join([f'{k}={v:+.1f}%' for k, v in relative_errors.items()])}")
 
@@ -546,17 +593,22 @@ class OptimisationPipeline:
             # Use optimization type from configuration
             if col_config.optimisation == 'minimum':
                 # Keep LOW values: suggest maximum threshold (filter out values above this)
-                if col_config.computed:
-                    # For computed columns, use explicit bounds from range_constraint
-                    if not col_config.range_constraint:
-                        logger.warning(f"Skipping computed column {col}: no range_constraint specified")
-                        continue
+                if col_config.range_constraint:
+                    # Use explicit bounds from range_constraint (for both computed and regular columns)
                     lower = col_config.range_constraint.min
                     upper = col_config.range_constraint.max
+                    if trial.number == 0:
+                        logger.info(f"  max_{col} search space: [{lower}, {upper}] (from range_constraint)")
+                elif col_config.computed:
+                    # For computed columns without range_constraint, skip
+                    logger.warning(f"Skipping computed column {col}: no range_constraint specified")
+                    continue
                 else:
-                    # For regular columns, use data quantiles
+                    # For regular columns without range_constraint, use data quantiles
                     lower = col_data.quantile(0.1)
                     upper = col_data.max()
+                    if trial.number == 0:
+                        logger.info(f"  max_{col} search space: [{lower:.2f}, {upper:.2f}] (from data quantiles)")
 
                 if col_config.dtype == 'int' and not is_cmaes:
                     params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower), int(upper))
@@ -567,17 +619,22 @@ class OptimisationPipeline:
 
             elif col_config.optimisation == 'maximum':
                 # Keep HIGH values: suggest minimum threshold (filter out values below this)
-                if col_config.computed:
-                    # For computed columns, use explicit bounds from range_constraint
-                    if not col_config.range_constraint:
-                        logger.warning(f"Skipping computed column {col}: no range_constraint specified")
-                        continue
+                if col_config.range_constraint:
+                    # Use explicit bounds from range_constraint (for both computed and regular columns)
                     lower = col_config.range_constraint.min
                     upper = col_config.range_constraint.max
+                    if trial.number == 0:
+                        logger.info(f"  min_{col} search space: [{lower}, {upper}] (from range_constraint)")
+                elif col_config.computed:
+                    # For computed columns without range_constraint, skip
+                    logger.warning(f"Skipping computed column {col}: no range_constraint specified")
+                    continue
                 else:
-                    # For regular columns, use data quantiles
+                    # For regular columns without range_constraint, use data quantiles
                     lower = col_data.min()
                     upper = col_data.quantile(0.9)
+                    if trial.number == 0:
+                        logger.info(f"  min_{col} search space: [{lower:.2f}, {upper:.2f}] (from data quantiles)")
 
                 if col_config.dtype == 'int' and not is_cmaes:
                     params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower), int(upper))

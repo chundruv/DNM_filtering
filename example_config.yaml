@@ -40,14 +40,22 @@ optimisation:
   columns:
     # Regular optimization columns
     # Minimize quality score (lower is better)
+    # Optional: Set explicit search space bounds with range_constraint
     - name: quality_score
       dtype: float
       optimisation: minimum
+      range_constraint:
+        min: 0.0
+        max: 100.0
 
     # Maximize coverage (higher is better)
+    # Optional: Set explicit search space bounds with range_constraint
     - name: coverage
       dtype: int
       optimisation: maximum
+      range_constraint:
+        min: 10
+        max: 200
 
     # Keep allele balance within a symmetric range
     # Using symmetric_range_constraint where upper = 1 - lower
@@ -58,10 +66,13 @@ optimisation:
         lower: 0.25
         scale: 1.0  # For 0-1 range (results in upper=0.75)
 
-    # Example: minimum read position bias
+    # Example: minimum read position bias with explicit bounds
     - name: read_pos_bias
       dtype: float
       optimisation: minimum
+      range_constraint:
+        min: 0.0
+        max: 10.0
 
     # Example: VAF percentage with symmetric range (for 0-100 scale)
     - name: vaf_percent
@@ -129,7 +140,10 @@ optimisation:
       linked_to: depth_father
 
   regression_formula: "dnm_count ~ paternal_age"
-  regression_weights: [1.0, 1.0]
+  # Weights for optimization: [intercept_weight, slope_weight, ...]
+  # Higher weight = more important to match that coefficient
+  # Typical: [0.1, 1.0] gives priority to slope while still considering intercept
+  regression_weights: [0.1, 1.0]
 
 # Performance settings
 max_workers: 4
