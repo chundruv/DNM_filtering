@@ -204,10 +204,13 @@ class OptimisationPipeline:
             
             # Count DNMs per sample
             counts = ref_subset.count_by_sample().rename('dnm_count').reset_index()
-            
-            # Get parental ages
+
+            # Get parental ages and filter out NA ages
             ages = ref_subset.variants[['SAMPLE', 'paternal_age', 'maternal_age']].drop_duplicates()
-            regression_data = ages.merge(counts, on='SAMPLE', how='left').fillna(0)
+            regression_data = ages.merge(counts, on='SAMPLE', how='left')
+            # Filter out samples with missing parental ages for optimization
+            regression_data = regression_data.dropna(subset=['paternal_age', 'maternal_age'])
+            regression_data['dnm_count'] = regression_data['dnm_count'].fillna(0)
             
             # Fit regression
             try:
@@ -403,7 +406,10 @@ class OptimisationPipeline:
 
             # Count DNMs
             dnm_counts = filtered.count_by_sample().rename('dnm_count').reset_index()
-            regression_data = parental_info.merge(dnm_counts, on='SAMPLE', how='left').fillna(0)
+            regression_data = parental_info.merge(dnm_counts, on='SAMPLE', how='left')
+            # Filter out samples with missing parental ages for optimization
+            regression_data = regression_data.dropna(subset=['paternal_age', 'maternal_age'])
+            regression_data['dnm_count'] = regression_data['dnm_count'].fillna(0)
 
             # Check if we have enough data for regression
             if len(regression_data) < 3:
@@ -499,7 +505,10 @@ class OptimisationPipeline:
 
             # Calculate DNM counts and fit regression
             dnm_counts = filtered.count_by_sample().rename('dnm_count').reset_index()
-            regression_data = parental_info.merge(dnm_counts, on='SAMPLE', how='left').fillna(0)
+            regression_data = parental_info.merge(dnm_counts, on='SAMPLE', how='left')
+            # Filter out samples with missing parental ages for optimization
+            regression_data = regression_data.dropna(subset=['paternal_age', 'maternal_age'])
+            regression_data['dnm_count'] = regression_data['dnm_count'].fillna(0)
 
             # Fit regression to get actual coefficients
             model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()

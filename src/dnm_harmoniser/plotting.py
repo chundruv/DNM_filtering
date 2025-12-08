@@ -95,15 +95,19 @@ def plot_optimization_results(
         for age_col, age_label, row_idx in age_types:
             ax = axes[row_idx, col_idx]
 
-            # Reference data (deCODE)
+            # Reference data (deCODE) - exclude samples with NA ages
             ref_counts = ref_subset.groupby('SAMPLE').size().rename('dnm_count')
             ref_ages = ref_subset[['SAMPLE', age_col]].drop_duplicates().set_index('SAMPLE')
-            plot_data_ref = ref_ages.join(ref_counts, how='left').fillna(0)
+            plot_data_ref = ref_ages.join(ref_counts, how='left')
+            plot_data_ref['dnm_count'] = plot_data_ref['dnm_count'].fillna(0)
+            plot_data_ref = plot_data_ref.dropna(subset=[age_col])
 
-            # Filtered input data
+            # Filtered input data - exclude samples with NA ages
             filt_counts = filtered_data.groupby('SAMPLE').size().rename('dnm_count')
             filt_ages = filtered_data[['SAMPLE', age_col]].drop_duplicates().set_index('SAMPLE')
-            plot_data_filt = filt_ages.join(filt_counts, how='left').fillna(0)
+            plot_data_filt = filt_ages.join(filt_counts, how='left')
+            plot_data_filt['dnm_count'] = plot_data_filt['dnm_count'].fillna(0)
+            plot_data_filt = plot_data_filt.dropna(subset=[age_col])
 
             # Plot scatter points only (no automatic regression lines)
             if len(plot_data_ref) > 0:

@@ -51,7 +51,6 @@ class VariantDataset:
         reference_col: str = 'ref',
         alternate_col: str = 'alt',
         required_cols: Optional[List[str]] = None,
-        max_length: int = 20
     ) -> 'VariantDataset':
         """Load from TSV file with automatic preprocessing."""
         df = pd.read_csv(path, sep='\t', on_bad_lines='skip', low_memory=False)
@@ -104,20 +103,29 @@ class VariantDataset:
         # Calculate midparage if parental ages exist
         if 'paternal_age' in df.columns and 'maternal_age' in df.columns:
             df['midparage'] = (df['paternal_age'] + df['maternal_age']) / 2
-        
-        # Convert numeric columns (including common variant filtering columns)
-        numeric_cols = [
-            'paternal_age', 'maternal_age', 'VAF', 'QUAL', 'DP',
-            'IMF', 'DNM', 'MQ', 'DeNovoCNN_prob', 'nparAADn0',
-            'child_coverage', 'father_coverage', 'mother_coverage',
-            'FS', 'GQ', 'PL', 'AD', 'IDV', 'RPBZ', 'MQBZ', 'BQBZ', 'MQSBZ', 'SCBZ', 'SGB', 'MQ0F'
-        ]
-        if required_cols:
-            numeric_cols.extend([c for c in required_cols if c not in numeric_cols])
 
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+        # Dynamically detect and convert numeric columns
+        # Try to convert all object-type columns to numeric
+        object_cols = df.select_dtypes(include=['object']).columns
+        for col in object_cols:
+            # Count NaN values before conversion
+            nan_before = df[col].isna().sum()
+
+            # Try numeric conversion
+            converted = pd.to_numeric(df[col], errors='coerce')
+            nan_after = converted.isna().sum()
+
+            # If conversion didn't create too many new NaNs, accept it
+            # Allow up to 5% of values to be non-numeric
+            threshold = len(df) * 0.05
+            if nan_after - nan_before <= threshold:
+                df[col] = converted
+
+        # Ensure required_cols are converted if specified
+        if required_cols:
+            for col in required_cols:
+                if col in df.columns and df[col].dtype == 'object':
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
         
         metadata = {
             'source': str(path),
