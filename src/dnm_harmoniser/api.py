@@ -7,6 +7,7 @@ import logging
 from .config import PipelineConfig, load_config
 from .data import VariantDataset
 from .pipeline import OptimisationPipeline, OptimisationResult
+from .pipeline_memory_efficient import MemoryEfficientPipeline
 
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,8 @@ def optimize_filters(
     n_trials: int = 100,
     preset: str = "balanced",
     output_dir: Optional[Union[str, Path]] = None,
-    seed: int = 42
+    seed: int = 42,
+    memory_efficient: bool = False
 ) -> Dict[str, Dict[str, Any]]:
     """
     Simple interface for variant filtering optimisation.
@@ -57,6 +59,9 @@ def optimize_filters(
     
     >>> # Thorough optimisation
     >>> params = optimize_filters("data.tsv", "reference.tsv", n_trials=500, preset="thorough")
+    
+    >>> # Memory-efficient mode for large datasets
+    >>> params = optimize_filters("data.tsv", "reference.tsv", memory_efficient=True)
     """
     # Load preset configuration
     config = PipelineConfig.from_preset(preset)
@@ -84,8 +89,11 @@ def optimize_filters(
         alternate_col=config.optimisation.alternate_column_reference
     )
     
-    # Run optimisation
-    pipeline = OptimisationPipeline(config)
+    # Run optimisation (use memory-efficient pipeline if requested)
+    if memory_efficient:
+        pipeline = MemoryEfficientPipeline(config)
+    else:
+        pipeline = OptimisationPipeline(config)
 
     # Convert output_dir to Path if provided
     output_path = Path(output_dir) if output_dir else None
@@ -119,6 +127,7 @@ def run_optimisation(
     config_file: Optional[Path] = None,
     output_dir: Optional[Union[str, Path]] = None,
     generate_plots: bool = True,
+    memory_efficient: bool = False,
     **kwargs
 ) -> OptimisationResult:
     """
@@ -170,6 +179,9 @@ def run_optimisation(
     ...     stage3__n_trials=1000,
     ...     output_dir="results/"
     ... )
+    
+    >>> # Memory-efficient mode for large datasets
+    >>> result = run_optimisation("data.tsv", "reference.tsv", memory_efficient=True)
     """
     # Load configuration
     if config is None:
@@ -210,8 +222,11 @@ def run_optimisation(
             alternate_col=config.optimisation.alternate_column_reference
         )
 
-    # Run pipeline with automatic plotting
-    pipeline = OptimisationPipeline(config)
+    # Run pipeline with automatic plotting (use memory-efficient pipeline if requested)
+    if memory_efficient:
+        pipeline = MemoryEfficientPipeline(config)
+    else:
+        pipeline = OptimisationPipeline(config)
     output_path = Path(output_dir) if output_dir else None
     return pipeline.run(data, reference, output_dir=output_path, generate_plots=generate_plots)
 

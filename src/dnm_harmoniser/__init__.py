@@ -17,6 +17,7 @@ from .config import (
     OptimisationConfig
 )
 from .pipeline import OptimisationPipeline
+from .pipeline_memory_efficient import MemoryEfficientPipeline
 from .data import VariantDataset
 from .plotting import plot_optimization_results, apply_filters_from_params, save_parameters
 
@@ -34,6 +35,7 @@ __all__ = [
     "ColumnConfig",
     "OptimisationConfig",
     "OptimisationPipeline",
+    "MemoryEfficientPipeline",
     "VariantDataset",
     "plot_optimization_results",
     "apply_filters_from_params",

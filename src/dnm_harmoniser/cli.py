@@ -51,7 +51,8 @@ def run(
         help="Configuration overrides (e.g., -O stage1.n_trials=100 -O stage3.sampler=cmaes)"
     ),
     verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Increase verbosity"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show configuration without running")
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show configuration without running"),
+    memory_efficient: bool = typer.Option(False, "--memory-efficient", "-m", help="Use memory-efficient pipeline for large datasets")
 ):
     """
     Run three-stage variant filtering optimisation.
@@ -75,6 +76,9 @@ def run(
         
         # Parallel processing with 8 workers
         variant-optimize data.tsv reference.tsv --workers 8
+        
+        # Memory-efficient mode for large datasets
+        variant-optimize data.tsv reference.tsv --memory-efficient
     """
     setup_logging(verbose)
     
@@ -165,7 +169,8 @@ def run(
             reference=reference,
             config=pipeline_config,
             output_dir=output,          # Pass output directory for automatic plotting
-            generate_plots=True         # Enable automatic plotting
+            generate_plots=True,        # Enable automatic plotting
+            memory_efficient=memory_efficient  # Use memory-efficient pipeline if requested
         )
 
         # Results are already saved by run_optimisation, but save again for backward compatibility
