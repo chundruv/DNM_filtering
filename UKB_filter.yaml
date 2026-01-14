@@ -99,7 +99,16 @@ optimisation:
         - Deletion
 
   regression_formula: "dnm_count ~ paternal_age"
-  regression_weights: [1.0, 1.0]
+  
+  # Fixed weights - UNCOMMENTED and set to prioritize intercept
+  regression_weights: [10.0, 1.0]  # [intercept_weight, slope_weight] - 10x weight on intercept
+  regression_weights_by_type:
+    Insertion: [10.0, 1.0]
+    Deletion: [10.0, 1.0]
+  
+  # DISABLED - let fixed weights work
+  optimise_intercept_weight: false
+  intercept_weight_range: [0.001, 1.0]  # ignored when optimise_intercept_weight: false
 
 # Performance settings
 max_workers: 4

@@ -6,8 +6,7 @@ import logging
 
 from .config import PipelineConfig, load_config
 from .data import VariantDataset
-from .pipeline import OptimisationPipeline, OptimisationResult
-from .pipeline_memory_efficient import MemoryEfficientPipeline
+from .pipeline import OptimisationPipeline, MemoryEfficientPipeline, OptimisationResult
 
 
 logger = logging.getLogger(__name__)

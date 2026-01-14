@@ -1,4 +1,11 @@
-"""Optimized three-stage pipeline implementation."""
+"""Memory-efficient three-stage pipeline implementation.
+
+This version minimizes memory usage by:
+1. Using boolean masks instead of DataFrame copies
+2. Pre-extracting numpy arrays for filter columns
+3. Using numpy operations instead of pandas groupby during trials
+4. Processing variant types sequentially with explicit memory cleanup
+"""
 
 import pandas as pd
 import numpy as np
@@ -6,8 +13,7 @@ import optuna
 import statsmodels.formula.api as smf
 from typing import Dict, List, Any, Optional, Tuple
 from joblib import Memory
-from concurrent.futures import ProcessPoolExecutor
-import hashlib
+import gc
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,13 +42,9 @@ class OptimisationResult:
         for var_type, params in self.best_params.items():
             lines.append(f"\n{var_type}:")
             score = self.best_scores.get(var_type, 0)
-            # Use scientific notation for very small scores
             score_str = f"{score:.4e}" if score < 0.01 else f"{score:.4f}"
             lines.append(f"  Best score: {score_str}")
             for param, value in params.items():
-                # Skip internal parameters
-                if param == 'intercept_weight':
-                    continue
                 if isinstance(value, float):
                     lines.append(f"  {param}: {value:.4f}")
                 else:
@@ -52,8 +54,129 @@ class OptimisationResult:
         return '\n'.join(lines)
 
 
-class OptimisationPipeline:
-    """Three-stage optimisation pipeline with caching and parallelization."""
+@dataclass
+class OptimisationArrays:
+    """Pre-extracted numpy arrays for memory-efficient optimization.
+    
+    Instead of passing full DataFrames to the objective function,
+    we pre-extract only the columns needed as numpy arrays.
+    """
+    # Sample IDs encoded as integers for fast groupby
+    sample_ids: np.ndarray  # int array of sample indices
+    sample_id_to_idx: Dict[str, int]  # mapping from sample name to index
+    idx_to_sample_id: Dict[int, str]  # reverse mapping
+    n_samples: int
+    
+    # Filter columns as numpy arrays (column_name -> array)
+    filter_arrays: Dict[str, np.ndarray]
+    
+    # Parental ages per sample (indexed by sample_idx)
+    paternal_ages: np.ndarray  # shape (n_samples,)
+    maternal_ages: np.ndarray  # shape (n_samples,)
+    valid_age_mask: np.ndarray  # bool array for samples with valid ages
+    
+    # Original number of variants
+    n_variants: int
+
+
+def extract_optimisation_arrays(
+    df: pd.DataFrame,
+    filter_columns: List[str],
+    sample_col: str = 'SAMPLE'
+) -> OptimisationArrays:
+    """Extract numpy arrays from DataFrame for memory-efficient optimization.
+    
+    This function extracts only the data needed for the objective function
+    as compact numpy arrays, allowing the original DataFrame to be freed.
+    """
+    # Create sample ID mapping
+    unique_samples = df[sample_col].unique()
+    sample_id_to_idx = {s: i for i, s in enumerate(unique_samples)}
+    idx_to_sample_id = {i: s for s, i in sample_id_to_idx.items()}
+    n_samples = len(unique_samples)
+    
+    # Encode sample IDs as integers
+    sample_ids = df[sample_col].map(sample_id_to_idx).values.astype(np.int32)
+    
+    # Extract filter columns
+    filter_arrays = {}
+    for col in filter_columns:
+        if col in df.columns:
+            # Convert to float32 to save memory
+            filter_arrays[col] = pd.to_numeric(df[col], errors='coerce').values.astype(np.float32)
+    
+    # Extract parental ages per sample
+    sample_ages = df[[sample_col, 'paternal_age', 'maternal_age']].drop_duplicates(subset=[sample_col])
+    sample_ages = sample_ages.set_index(sample_col)
+    
+    paternal_ages = np.full(n_samples, np.nan, dtype=np.float32)
+    maternal_ages = np.full(n_samples, np.nan, dtype=np.float32)
+    
+    for sample, idx in sample_id_to_idx.items():
+        if sample in sample_ages.index:
+            paternal_ages[idx] = sample_ages.loc[sample, 'paternal_age']
+            maternal_ages[idx] = sample_ages.loc[sample, 'maternal_age']
+    
+    valid_age_mask = ~(np.isnan(paternal_ages) | np.isnan(maternal_ages))
+    
+    return OptimisationArrays(
+        sample_ids=sample_ids,
+        sample_id_to_idx=sample_id_to_idx,
+        idx_to_sample_id=idx_to_sample_id,
+        n_samples=n_samples,
+        filter_arrays=filter_arrays,
+        paternal_ages=paternal_ages,
+        maternal_ages=maternal_ages,
+        valid_age_mask=valid_age_mask,
+        n_variants=len(df)
+    )
+
+
+def apply_filters_mask(
+    arrays: OptimisationArrays,
+    params: Dict[str, Any]
+) -> np.ndarray:
+    """Apply filter parameters and return boolean mask (no copy created).
+    
+    Returns a boolean array indicating which variants pass all filters.
+    """
+    mask = np.ones(arrays.n_variants, dtype=bool)
+    
+    for param, value in params.items():
+        if param.startswith('min_'):
+            col = param[4:]
+            if col in arrays.filter_arrays:
+                col_mask = arrays.filter_arrays[col] >= value
+                # Handle NaN values - exclude them
+                col_mask &= ~np.isnan(arrays.filter_arrays[col])
+                mask &= col_mask
+        elif param.startswith('max_'):
+            col = param[4:]
+            if col in arrays.filter_arrays:
+                col_mask = arrays.filter_arrays[col] <= value
+                col_mask &= ~np.isnan(arrays.filter_arrays[col])
+                mask &= col_mask
+    
+    return mask
+
+
+def count_per_sample_fast(
+    sample_ids: np.ndarray,
+    mask: np.ndarray,
+    n_samples: int
+) -> np.ndarray:
+    """Fast per-sample counting using numpy bincount.
+    
+    Much faster than pandas groupby for this use case.
+    """
+    # Only count samples that pass the filter
+    filtered_samples = sample_ids[mask]
+    counts = np.bincount(filtered_samples, minlength=n_samples)
+    return counts
+
+
+class MemoryEfficientPipeline:
+    """Memory-efficient three-stage optimisation pipeline."""
     
     def __init__(self, config: PipelineConfig):
         self.config = config
@@ -62,11 +185,6 @@ class OptimisationPipeline:
         if config.use_cache:
             cache_dir = config.cache_dir or './cache'
             self.memory = Memory(cache_dir, verbose=0)
-            self._stage1_cached = self.memory.cache(self._stage1_warmup)
-            self._stage2_cached = self.memory.cache(self._stage2_outliers)
-        else:
-            self._stage1_cached = self._stage1_warmup
-            self._stage2_cached = self._stage2_outliers
         
         # Set seeds for reproducibility
         if config.deterministic:
@@ -79,7 +197,6 @@ class OptimisationPipeline:
         random.seed(seed)
         np.random.seed(seed)
         os.environ['PYTHONHASHSEED'] = str(seed)
-        # Set Optuna verbosity to INFO to see progress bars
         optuna.logging.set_verbosity(optuna.logging.INFO)
     
     def run(
@@ -89,32 +206,13 @@ class OptimisationPipeline:
         output_dir: Optional[Path] = None,
         generate_plots: bool = True
     ) -> OptimisationResult:
-        """
-        Run complete three-stage optimisation pipeline.
-
-        Stage 1: Warmup optimisation (if enabled)
-        Stage 2: Outlier removal (if enabled)
-        Stage 3: Full optimisation
-
-        Parameters
-        ----------
-        data : VariantDataset
-            Input variant data
-        reference : VariantDataset
-            Reference dataset for regression targets
-        output_dir : Path, optional
-            Directory to save plots and filtered results
-        generate_plots : bool, default=True
-            Whether to automatically generate plots after optimization
-
-        Returns
-        -------
-        OptimisationResult
-            Complete optimization results including parameters and scores
-        """
+        """Run complete three-stage optimisation pipeline."""
         logger.info("="*60)
-        logger.info("Starting three-stage optimisation pipeline")
+        logger.info("Starting MEMORY-EFFICIENT three-stage optimisation pipeline")
         logger.info("="*60)
+        
+        # Log initial memory usage
+        self._log_memory_usage("Initial")
 
         # Calculate regression targets from reference
         logger.info("Calculating regression targets from reference data...")
@@ -122,18 +220,19 @@ class OptimisationPipeline:
         logger.info(f"Targets calculated for {len(targets_by_type)} variant types")
 
         warmup_params = {}
-        data_clean = data
         n_removed = 0
+        samples_to_keep = None
 
-        # Stage 1: Warmup
+        # Stage 1: Warmup - process each variant type sequentially
         logger.info("")
         logger.info("="*60)
         logger.info("STAGE 1: WARMUP OPTIMISATION")
         logger.info("="*60)
         if self.config.stage1.enabled:
             logger.info(f"Running warmup with {self.config.stage1.n_trials} trials per variant type...")
-            warmup_params = self._run_warmup(data, targets_by_type)
+            warmup_params = self._run_warmup_sequential(data, targets_by_type)
             logger.info(f"✓ Warmup complete for {len(warmup_params)} variant types")
+            self._log_memory_usage("After warmup")
         else:
             logger.info("Stage 1 disabled in configuration")
 
@@ -144,28 +243,58 @@ class OptimisationPipeline:
         logger.info("="*60)
         if self.config.stage2.enabled and warmup_params:
             logger.info(f"Removing outliers with DNM count range: {self.config.stage2.min_dnm_count}-{self.config.stage2.max_dnm_count}")
-            data_clean, n_removed = self._remove_outliers(data, warmup_params)
-            logger.info(f"✓ Removed {n_removed} outlier individuals ({len(data_clean)} samples remaining)")
+            samples_to_keep, n_removed = self._identify_outliers(data, warmup_params)
+            logger.info(f"✓ Identified {n_removed} outlier individuals")
+            self._log_memory_usage("After outlier identification")
         elif self.config.stage2.enabled and not warmup_params:
             logger.warning("Skipping outlier removal (no warmup parameters available)")
         else:
             logger.info("Stage 2 disabled in configuration")
 
-        # Stage 3: Full optimisation
+        # Stage 3: Full optimisation with iterative outlier removal
         logger.info("")
         logger.info("="*60)
         logger.info("STAGE 3: FULL BAYESIAN OPTIMISATION")
         logger.info("="*60)
+        final_params = {}
+        scores = {}
         if self.config.stage3.enabled:
             logger.info(f"Running full optimisation with {self.config.stage3.n_trials} trials...")
             logger.info(f"Sampler: {self.config.stage3.sampler}, Pruner: {self.config.stage3.pruner}")
-            final_params, scores, study = self._run_full_optimisation(data_clean, targets_by_type)
+            
+            # Iterative optimization: remove outliers based on current best params until stable
+            max_iterations = 5
+            for iteration in range(max_iterations):
+                logger.info(f"Optimisation iteration {iteration + 1}...")
+                
+                final_params, scores = self._run_full_optimisation_sequential(
+                    data, targets_by_type, samples_to_keep
+                )
+                
+                # Check for new outliers under final params
+                if self.config.stage2.enabled and final_params:
+                    new_samples_to_keep, n_new_outliers = self._identify_outliers_with_params(
+                        data, final_params, samples_to_keep
+                    )
+                    if n_new_outliers > 0:
+                        logger.info(f"Found {n_new_outliers} new outliers under optimised parameters")
+                        samples_to_keep = new_samples_to_keep
+                        n_removed += n_new_outliers
+                        logger.info(f"Removed {n_new_outliers} outliers, re-running optimisation...")
+                    else:
+                        logger.info(f"✓ No new outliers found - optimisation converged after {iteration + 1} iteration(s)")
+                        break
+                else:
+                    break
+            else:
+                logger.warning(f"Optimisation did not converge after {max_iterations} iterations")
+            
             logger.info(f"✓ Full optimisation complete")
+            self._log_memory_usage("After full optimisation")
         else:
             logger.warning("Stage 3 disabled in configuration, using warmup parameters as final")
             final_params = warmup_params
             scores = {}
-            study = None
 
         # Create result object
         result = OptimisationResult(
@@ -173,15 +302,21 @@ class OptimisationPipeline:
             best_scores=scores,
             warmup_params=warmup_params if warmup_params else None,
             n_individuals_removed=n_removed,
-            study=study
+            study=None
         )
 
         # Generate plots if requested
         if generate_plots and output_dir and final_params:
             logger.info("Generating optimization result plots")
             try:
+                # Filter data for plotting
+                if samples_to_keep is not None:
+                    plot_df = data.variants[data.variants['SAMPLE'].isin(samples_to_keep)]
+                else:
+                    plot_df = data.variants
+                
                 plot_optimization_results(
-                    data_df=data_clean.variants,
+                    data_df=plot_df,
                     reference_df=reference.variants,
                     best_params=final_params,
                     output_dir=output_dir,
@@ -193,26 +328,37 @@ class OptimisationPipeline:
 
         return result
     
+    def _log_memory_usage(self, stage: str):
+        """Log current memory usage."""
+        try:
+            import psutil
+            process = psutil.Process()
+            mem_mb = process.memory_info().rss / 1024 / 1024
+            logger.info(f"Memory usage ({stage}): {mem_mb:.1f} MB")
+        except ImportError:
+            pass
+    
     def _calculate_targets(self, reference: VariantDataset) -> Dict[str, np.ndarray]:
         """Calculate regression targets from reference data."""
         targets = {}
         
         for var_type in self.config.optimisation.variant_types:
-            ref_subset = reference.filter_by_type(var_type)
-            if len(ref_subset) == 0:
+            # Use boolean mask instead of copy
+            type_mask = reference.variants['var_type'] == var_type
+            if type_mask.sum() == 0:
                 continue
             
+            ref_subset = reference.variants[type_mask]
+            
             # Count DNMs per sample
-            counts = ref_subset.count_by_sample().rename('dnm_count').reset_index()
+            counts = ref_subset.groupby('SAMPLE').size().rename('dnm_count').reset_index()
 
-            # Get parental ages and filter out NA ages
-            ages = ref_subset.variants[['SAMPLE', 'paternal_age', 'maternal_age']].drop_duplicates()
+            # Get parental ages
+            ages = ref_subset[['SAMPLE', 'paternal_age', 'maternal_age']].drop_duplicates()
             regression_data = ages.merge(counts, on='SAMPLE', how='left')
-            # Filter out samples with missing parental ages for optimization
             regression_data = regression_data.dropna(subset=['paternal_age', 'maternal_age'])
             regression_data['dnm_count'] = regression_data['dnm_count'].fillna(0)
             
-            # Fit regression
             try:
                 model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
                 targets[var_type] = model.params.values
@@ -222,243 +368,407 @@ class OptimisationPipeline:
         
         return targets
     
-    def _run_warmup(
+    def _get_filter_columns(self, var_type: str) -> List[str]:
+        """Get list of columns that will be filtered for a variant type."""
+        columns = []
+        opt_columns = self.config.optimisation.get_optimisation_columns_for_variant_type(var_type)
+        
+        for col_config in opt_columns:
+            columns.append(col_config.name)
+        
+        # Add linked columns
+        linked_groups = self.config.optimisation.get_linked_column_groups()
+        for group in linked_groups:
+            for col_config in group:
+                if col_config.name not in columns:
+                    columns.append(col_config.name)
+        
+        return columns
+    
+    def _apply_range_prefilter(self, df: pd.DataFrame, var_type: str) -> pd.DataFrame:
+        """Pre-filter DataFrame based on range constraints.
+        
+        This is particularly important for CMA-ES which treats all parameters as
+        floats and cannot enforce hard range constraints during optimization.
+        By pre-filtering, we ensure variants outside the valid range are excluded.
+        """
+        opt_columns = self.config.optimisation.get_optimisation_columns_for_variant_type(var_type)
+        mask = np.ones(len(df), dtype=bool)
+        
+        for col_config in opt_columns:
+            if col_config.range_constraint and col_config.optimisation == 'range':
+                col = col_config.name
+                
+                # Handle computed columns (like abs_length)
+                if col_config.computed and col in df.columns:
+                    col_data = pd.to_numeric(df[col], errors='coerce')
+                elif col in df.columns:
+                    col_data = pd.to_numeric(df[col], errors='coerce')
+                else:
+                    continue
+                
+                # Apply range constraint
+                range_min = col_config.range_constraint.min
+                range_max = col_config.range_constraint.max
+                
+                col_mask = (col_data >= range_min) & (col_data <= range_max) & (~col_data.isna())
+                n_filtered = (~col_mask).sum()
+                
+                if n_filtered > 0:
+                    logger.info(f"  Pre-filtering {col}: removing {n_filtered} variants outside [{range_min}, {range_max}]")
+                
+                mask &= col_mask.values
+        
+        return df[mask]
+    
+    def _run_warmup_sequential(
         self,
         data: VariantDataset,
         targets: Dict[str, np.ndarray]
     ) -> Dict[str, Dict[str, Any]]:
-        """Stage 1: Fast warmup optimisation."""
-        warmup_params = {}
+        """Stage 1: Run warmup optimization for each variant type.
         
-        # Process variant types in parallel if configured
-        if self.config.max_workers > 1:
-            with ProcessPoolExecutor(max_workers=min(self.config.max_workers, len(targets))) as executor:
-                futures = {}
-                for var_type in targets:
-                    future = executor.submit(
-                        self._optimize_variant_type,
-                        data.filter_by_type(var_type),
-                        targets[var_type],
-                        self.config.stage1.n_trials,
-                        f"warmup_{var_type}",
-                        var_type
-                    )
-                    futures[var_type] = future
-
-                for var_type, future in futures.items():
-                    params, _ = future.result()
-                    if params:
-                        warmup_params[var_type] = params
-        else:
-            # Sequential processing for deterministic results
-            for var_type in targets:
-                params, _ = self._optimize_variant_type(
-                    data.filter_by_type(var_type),
-                    targets[var_type],
-                    self.config.stage1.n_trials,
-                    f"warmup_{var_type}",
-                    var_type
-                )
-                if params:
-                    warmup_params[var_type] = params
+        Uses Optuna's n_jobs for parallel trial evaluation within each variant type.
+        """
+        warmup_params = {}
+        is_cmaes = self.config.stage3.sampler == 'cmaes'
+        
+        for var_type in targets:
+            logger.info(f"Processing {var_type}...")
+            
+            # Get filter columns for this variant type
+            filter_columns = self._get_filter_columns(var_type)
+            
+            # Filter to this variant type using boolean mask
+            type_mask = data.variants['var_type'] == var_type
+            var_df = data.variants[type_mask].copy()
+            
+            if len(var_df) == 0:
+                continue
+            
+            # For CMA-ES, pre-filter based on range constraints
+            if is_cmaes:
+                var_df = self._apply_range_prefilter(var_df, var_type)
+                if len(var_df) == 0:
+                    logger.warning(f"  No variants remaining after range pre-filter for {var_type}")
+                    continue
+            
+            # Extract numpy arrays
+            logger.info(f"  Extracting arrays for {len(var_df)} {var_type} variants...")
+            arrays = extract_optimisation_arrays(var_df, filter_columns)
+            
+            # Run optimization with parallel trials
+            params, _ = self._optimize_with_arrays(
+                arrays,
+                targets[var_type],
+                self.config.stage1.n_trials,
+                f"warmup_{var_type}",
+                var_type
+            )
+            
+            if params:
+                warmup_params[var_type] = params
+            
+            # Explicit cleanup
+            del arrays
+            gc.collect()
+            self._log_memory_usage(f"After {var_type} warmup")
         
         return warmup_params
     
-    def _stage1_warmup(self, data_hash: str, config_hash: str) -> Dict[str, Dict[str, Any]]:
-        """Cached warmup stage."""
-        # This is wrapped by joblib.Memory for caching
-        return self._run_warmup(data, targets)
-    
-    def _remove_outliers(
+    def _identify_outliers(
         self,
         data: VariantDataset,
         warmup_params: Dict[str, Dict[str, Any]]
-    ) -> Tuple[VariantDataset, int]:
-        """Stage 2: Remove outlier individuals based on filtered DNM counts."""
-
-        logger.info("Applying warmup filters to count DNMs per individual...")
-
-        # Apply warmup filters and count DNMs
-        all_filtered = []
+    ) -> Tuple[set, int]:
+        """Stage 2: Identify outlier samples based on filtered DNM counts.
+        
+        Returns set of samples to keep and count of removed samples.
+        """
+        logger.info("Counting filtered DNMs per individual...")
+        
+        # Count filtered DNMs per sample across all variant types
+        sample_counts = {}
+        
         for var_type, params in warmup_params.items():
-            var_data = data.filter_by_type(var_type)
-            logger.info(f"  {var_type}: {len(var_data)} variants before warmup filters")
-            filtered = var_data.apply_filters(params)
-            logger.info(f"  {var_type}: {len(filtered)} variants after warmup filters ({len(filtered)/len(var_data)*100:.1f}% retained)")
-            logger.info(f"  {var_type} warmup params: {params}")
-            all_filtered.append(filtered.variants)
-
-        if not all_filtered:
-            logger.warning("No filtered variants after applying warmup filters!")
-            return data, 0
-
-        # Combine and count total filtered DNMs per individual
-        combined = pd.concat(all_filtered, ignore_index=True)
-        total_counts = combined.groupby('SAMPLE').size().sort_values()
-
-        logger.info(f"DNM count distribution across {len(total_counts)} individuals:")
+            type_mask = data.variants['var_type'] == var_type
+            var_df = data.variants[type_mask]
+            
+            if len(var_df) == 0:
+                continue
+            
+            logger.info(f"  {var_type}: {len(var_df)} variants before warmup filters")
+            
+            # Apply filters using boolean mask
+            filter_mask = np.ones(len(var_df), dtype=bool)
+            for param, value in params.items():
+                if param.startswith('min_'):
+                    col = param[4:]
+                    if col in var_df.columns:
+                        col_vals = pd.to_numeric(var_df[col], errors='coerce')
+                        filter_mask &= (col_vals >= value).values & (~col_vals.isna()).values
+                elif param.startswith('max_'):
+                    col = param[4:]
+                    if col in var_df.columns:
+                        col_vals = pd.to_numeric(var_df[col], errors='coerce')
+                        filter_mask &= (col_vals <= value).values & (~col_vals.isna()).values
+            
+            filtered_count = filter_mask.sum()
+            logger.info(f"  {var_type}: {filtered_count} variants after warmup filters ({filtered_count/len(var_df)*100:.1f}% retained)")
+            
+            # Count per sample
+            filtered_df = var_df[filter_mask]
+            type_counts = filtered_df.groupby('SAMPLE').size()
+            
+            for sample, count in type_counts.items():
+                sample_counts[sample] = sample_counts.get(sample, 0) + count
+        
+        # Convert to series for analysis
+        total_counts = pd.Series(sample_counts).sort_values()
+        initial_count = len(total_counts)
+        
+        logger.info(f"DNM count distribution across {initial_count} individuals:")
         logger.info(f"  Min: {total_counts.min()}, Max: {total_counts.max()}, Mean: {total_counts.mean():.1f}, Median: {total_counts.median():.1f}")
-        logger.info(f"  Percentiles - 5%: {total_counts.quantile(0.05):.1f}, 95%: {total_counts.quantile(0.95):.1f}")
-
-        # Determine samples to keep
-        samples_to_keep = total_counts.index
-        initial_count = len(samples_to_keep)
-
+        
+        # Identify samples to keep
+        samples_to_keep = set(total_counts.index)
+        
         if self.config.stage2.min_dnm_count:
-            samples_below_min = total_counts[total_counts < self.config.stage2.min_dnm_count]
-            samples_to_keep = total_counts[total_counts >= self.config.stage2.min_dnm_count].index
-            logger.info(f"Removing {len(samples_below_min)} individuals with < {self.config.stage2.min_dnm_count} DNMs")
-            if len(samples_below_min) > 0:
-                logger.info(f"  DNM counts of removed (min): {samples_below_min.tolist()}")
-
+            below_min = total_counts[total_counts < self.config.stage2.min_dnm_count]
+            samples_to_keep -= set(below_min.index)
+            logger.info(f"Removing {len(below_min)} individuals with < {self.config.stage2.min_dnm_count} DNMs")
+        
         if self.config.stage2.max_dnm_count:
-            samples_above_max = total_counts[
-                (total_counts > self.config.stage2.max_dnm_count) &
-                (total_counts.index.isin(samples_to_keep))
-            ]
-            samples_to_keep = total_counts[
-                (total_counts <= self.config.stage2.max_dnm_count) &
-                (total_counts.index.isin(samples_to_keep))
-            ].index
-            logger.info(f"Removing {len(samples_above_max)} individuals with > {self.config.stage2.max_dnm_count} DNMs")
-            if len(samples_above_max) > 0:
-                logger.info(f"  DNM counts of removed (max): {samples_above_max.tolist()}")
-
+            above_max = total_counts[total_counts > self.config.stage2.max_dnm_count]
+            samples_to_keep -= set(above_max.index)
+            logger.info(f"Removing {len(above_max)} individuals with > {self.config.stage2.max_dnm_count} DNMs")
+        
         n_removed = initial_count - len(samples_to_keep)
-
-        # Filter data
-        filtered_variants = data.variants[data.variants['SAMPLE'].isin(samples_to_keep)].copy()
-
         logger.info(f"Outlier removal complete: kept {len(samples_to_keep)}/{initial_count} individuals")
-
-        return VariantDataset(variants=filtered_variants, metadata=data.metadata), n_removed
+        
+        return samples_to_keep, n_removed
     
-    def _stage2_outliers(self, data_hash: str, warmup_hash: str) -> Tuple[str, int]:
-        """Cached outlier removal stage."""
-        # Returns hash of cleaned data and number removed
-        clean_data, n_removed = self._remove_outliers(data, warmup_params)
-        return clean_data.get_hash(), n_removed
-    
-    def _run_full_optimisation(
+    def _identify_outliers_with_params(
         self,
         data: VariantDataset,
-        targets: Dict[str, np.ndarray]
-    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, float], Optional[optuna.Study]]:
-        """Stage 3: Full Bayesian optimisation."""
+        params: Dict[str, Dict[str, Any]],
+        current_samples: Optional[set] = None
+    ) -> Tuple[set, int]:
+        """Identify outlier samples based on filtered DNM counts with given params.
+        
+        Similar to _identify_outliers but works with any parameter set and 
+        optionally restricts to a subset of samples.
+        
+        Returns set of samples to keep and count of removed samples.
+        """
+        # Count filtered DNMs per sample across all variant types
+        sample_counts = {}
+        
+        for var_type, var_params in params.items():
+            type_mask = data.variants['var_type'] == var_type
+            if current_samples is not None:
+                type_mask &= data.variants['SAMPLE'].isin(current_samples)
+            
+            var_df = data.variants[type_mask]
+            
+            if len(var_df) == 0:
+                continue
+            
+            # Apply filters using boolean mask
+            filter_mask = np.ones(len(var_df), dtype=bool)
+            for param, value in var_params.items():
+                if param.startswith('min_'):
+                    col = param[4:]
+                    if col in var_df.columns:
+                        col_vals = pd.to_numeric(var_df[col], errors='coerce')
+                        filter_mask &= (col_vals >= value).values & (~col_vals.isna()).values
+                elif param.startswith('max_'):
+                    col = param[4:]
+                    if col in var_df.columns:
+                        col_vals = pd.to_numeric(var_df[col], errors='coerce')
+                        filter_mask &= (col_vals <= value).values & (~col_vals.isna()).values
+            
+            # Count per sample
+            filtered_df = var_df[filter_mask]
+            type_counts = filtered_df.groupby('SAMPLE').size()
+            
+            for sample, count in type_counts.items():
+                sample_counts[sample] = sample_counts.get(sample, 0) + count
+        
+        # Convert to series for analysis
+        total_counts = pd.Series(sample_counts).sort_values()
+        
+        # Start with current samples or all samples
+        if current_samples is not None:
+            samples_to_keep = set(current_samples)
+        else:
+            samples_to_keep = set(total_counts.index)
+        
+        initial_count = len(samples_to_keep)
+        
+        # Apply thresholds
+        if self.config.stage2.min_dnm_count:
+            below_min = total_counts[total_counts < self.config.stage2.min_dnm_count]
+            samples_to_keep -= set(below_min.index)
+        
+        if self.config.stage2.max_dnm_count:
+            above_max = total_counts[total_counts > self.config.stage2.max_dnm_count]
+            removed_above = set(above_max.index) & samples_to_keep
+            if removed_above:
+                logger.info(f"  Samples exceeding max_dnm_count ({self.config.stage2.max_dnm_count}): {len(removed_above)}")
+                logger.info(f"  Their counts: {[int(total_counts[s]) for s in list(removed_above)[:10]]}{'...' if len(removed_above) > 10 else ''}")
+            samples_to_keep -= set(above_max.index)
+        
+        n_removed = initial_count - len(samples_to_keep)
+        
+        return samples_to_keep, n_removed
+    
+    def _run_full_optimisation_sequential(
+        self,
+        data: VariantDataset,
+        targets: Dict[str, np.ndarray],
+        samples_to_keep: Optional[set] = None
+    ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, float]]:
+        """Stage 3: Run full optimization for each variant type.
+        
+        Uses Optuna's n_jobs for parallel trial evaluation within each variant type.
+        """
         final_params = {}
         scores = {}
-        studies = {}
-
+        is_cmaes = self.config.stage3.sampler == 'cmaes'
+        
         for var_type in targets:
-            params, best_score = self._optimize_variant_type(
-                data.filter_by_type(var_type),
+            logger.info(f"Processing {var_type}...")
+            
+            # Get filter columns
+            filter_columns = self._get_filter_columns(var_type)
+            
+            # Filter to this variant type and kept samples
+            type_mask = data.variants['var_type'] == var_type
+            if samples_to_keep is not None:
+                type_mask &= data.variants['SAMPLE'].isin(samples_to_keep)
+            
+            var_df = data.variants[type_mask].copy()
+            
+            if len(var_df) == 0:
+                continue
+            
+            # For CMA-ES, pre-filter based on range constraints
+            if is_cmaes:
+                var_df = self._apply_range_prefilter(var_df, var_type)
+                if len(var_df) == 0:
+                    logger.warning(f"  No variants remaining after range pre-filter for {var_type}")
+                    continue
+            
+            # Extract numpy arrays
+            logger.info(f"  Extracting arrays for {len(var_df)} {var_type} variants...")
+            arrays = extract_optimisation_arrays(var_df, filter_columns)
+            
+            # Run optimization with parallel trials
+            params, best_score = self._optimize_with_arrays(
+                arrays,
                 targets[var_type],
                 self.config.stage3.n_trials,
                 f"final_{var_type}",
                 var_type,
                 use_pruning=self.config.stage3.pruner is not None
             )
+            
             if params:
                 final_params[var_type] = params
                 scores[var_type] = best_score
-
-        return final_params, scores, None  # Return None for study for now
+            
+            # Explicit cleanup
+            del arrays
+            gc.collect()
+            self._log_memory_usage(f"After {var_type} full optimisation")
+        
+        return final_params, scores
     
-    def _optimize_variant_type(
+    def _optimize_with_arrays(
         self,
-        data: VariantDataset,
+        arrays: OptimisationArrays,
         targets: np.ndarray,
         n_trials: int,
         study_name: str,
         var_type: str,
         use_pruning: bool = False
     ) -> Tuple[Optional[Dict[str, Any]], float]:
-        """Optimize filtering parameters for one variant type.
-
-        Args:
-            data: Variant dataset (already filtered by type)
-            targets: Target regression coefficients
-            n_trials: Number of optimization trials
-            study_name: Name for the optimization study
-            var_type: Variant type being optimized (SNV, Insertion, Deletion)
-            use_pruning: Whether to use pruning
-
-        Returns:
-            Tuple of (best_params, best_score). If optimization fails, returns (None, inf).
+        """Optimize using pre-extracted numpy arrays (memory efficient).
+        
+        Uses Optuna's n_jobs for parallel trial evaluation via multiprocessing.
         """
-
-        if len(data) == 0:
+        
+        if arrays.n_variants == 0:
             return None, float('inf')
         
-        # Get parental ages
-        parental_info = data.variants[['SAMPLE', 'paternal_age', 'maternal_age']].drop_duplicates()
+        # Pre-compute regression data structure (only samples with valid ages)
+        valid_sample_indices = np.where(arrays.valid_age_mask)[0]
+        n_valid_samples = len(valid_sample_indices)
+        
+        if n_valid_samples < 3:
+            logger.warning(f"Not enough samples with valid ages: {n_valid_samples}")
+            return None, float('inf')
+        
+        # Pre-extract ages for valid samples
+        valid_paternal_ages = arrays.paternal_ages[valid_sample_indices]
+        valid_maternal_ages = arrays.maternal_ages[valid_sample_indices]
         
         def objective(trial):
-            # Suggest parameters based on data distribution
-            params = self._suggest_params(trial, data, var_type)
-
-            # Apply filters
-            filtered = data.apply_filters(params)
-
-            if len(filtered) == 0:
-                logger.debug(f"Trial {trial.number}: No variants remaining after filtering")
+            # Suggest parameters
+            params = self._suggest_params_for_arrays(trial, arrays, var_type)
+            
+            # Apply filters using boolean mask (no copy!)
+            mask = apply_filters_mask(arrays, params)
+            n_retained = mask.sum()
+            
+            if n_retained == 0:
                 return float('inf')
-
-            # Count DNMs
-            dnm_counts = filtered.count_by_sample().rename('dnm_count').reset_index()
-            regression_data = parental_info.merge(dnm_counts, on='SAMPLE', how='left')
-            # Filter out samples with missing parental ages for optimization
-            regression_data = regression_data.dropna(subset=['paternal_age', 'maternal_age'])
-            regression_data['dnm_count'] = regression_data['dnm_count'].fillna(0)
-
-            # Check if we have enough data for regression
-            if len(regression_data) < 3:
-                logger.debug(f"Trial {trial.number}: Not enough samples for regression: {len(regression_data)}")
+            
+            # Count per sample using fast numpy bincount
+            counts = count_per_sample_fast(arrays.sample_ids, mask, arrays.n_samples)
+            
+            # Get counts for valid samples only
+            valid_counts = counts[valid_sample_indices].astype(np.float64)
+            
+            # Check if we have enough variation
+            if valid_counts.sum() == 0:
                 return float('inf')
-
+            
             try:
+                # Build regression data (reuse pre-allocated arrays)
+                regression_data = pd.DataFrame({
+                    'dnm_count': valid_counts,
+                    'paternal_age': valid_paternal_ages,
+                    'maternal_age': valid_maternal_ages
+                })
+                
                 # Fit regression
                 model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
                 fitted_intercept = model.params.values[0]
                 fitted_slope = model.params.values[1] if len(model.params.values) > 1 else 0
                 target_intercept = targets[0]
                 target_slope = targets[1] if len(targets) > 1 else 0
-
-                # Calculate weighted loss using regression_weights from config
-                # regression_weights[0] = intercept weight, regression_weights[1] = slope weight
-                weights = self.config.optimisation.regression_weights
-                intercept_weight = weights[0] if len(weights) > 0 else 0.1
+                
+                # Calculate loss using relative error
+                weights = self.config.optimisation.get_regression_weights(var_type)
+                intercept_weight = weights[0] if len(weights) > 0 else 1.0
                 slope_weight = weights[1] if len(weights) > 1 else 1.0
-
-                # Calculate relative errors for each coefficient
+                
                 slope_rel_error = (fitted_slope - target_slope) / (np.abs(target_slope) + 1e-10)
                 intercept_rel_error = (fitted_intercept - target_intercept) / (np.abs(target_intercept) + 1e-10)
-
-                # Weighted loss (squared errors)
+                
                 total_loss = (intercept_weight * intercept_rel_error ** 2) + (slope_weight * slope_rel_error ** 2)
-
-                # Log every 10th trial for monitoring
-                if trial.number % 10 == 0:
-                    logger.debug(f"Trial {trial.number}: {len(filtered)}/{len(data)} variants retained, "
-                               f"slope={fitted_slope:.4f} (target={target_slope:.4f}, weight={slope_weight}), "
-                               f"intercept={fitted_intercept:.4f} (target={target_intercept:.4f}, weight={intercept_weight}), "
-                               f"loss={total_loss:.6f}")
-
-                # Report for pruning if enabled
+                
                 if use_pruning and trial.number > 0:
                     trial.report(total_loss, trial.number)
                     if trial.should_prune():
                         raise optuna.TrialPruned()
-
+                
                 return total_loss
-
+                
             except Exception as e:
-                # Log detailed error information
-                logger.warning(f"Trial {trial.number}: Regression failed: {e}")
-                logger.debug(f"  Regression data shape: {regression_data.shape}")
-                logger.debug(f"  DNM count range: {regression_data['dnm_count'].min()}-{regression_data['dnm_count'].max()}")
-                logger.debug(f"  Age columns present: {regression_data.columns.tolist()}")
-                logger.debug(f"  Formula: {self.config.optimisation.regression_formula}")
+                logger.debug(f"Trial {trial.number}: Regression failed: {e}")
                 return float('inf')
         
         # Create study
@@ -484,246 +794,168 @@ class OptimisationPipeline:
             study_name=study_name
         )
         
-        # Run optimisation
+        # Run optimisation with parallel trials
+        # Note: n_jobs > 1 uses joblib multiprocessing which requires picklable objectives
+        # The loky backend (joblib default) handles closures via cloudpickle
+        n_jobs = self.config.max_workers
+        if n_jobs > 1:
+            logger.info(f"  Running {n_trials} trials with {n_jobs} parallel workers...")
         study.optimize(
-            objective,
-            n_trials=n_trials,
-            n_jobs=1 if self.config.deterministic else self.config.max_workers
+            objective, 
+            n_trials=n_trials, 
+            n_jobs=n_jobs, 
+            show_progress_bar=(n_jobs == 1)  # Progress bar doesn't work well with multiprocessing
         )
         
-        # Use scientific notation for very small scores
         score_str = f"{study.best_value:.4e}" if study.best_value < 0.01 else f"{study.best_value:.6f}"
         logger.info(f"Optimisation for {study_name} finished. Best score: {score_str}")
-
-        # Add detailed logging about the best trial
-        try:
-            best_params = study.best_params
-
-            # Apply best filters to get final data
-            filtered = data.apply_filters(best_params)
-            retention_rate = len(filtered) / len(data) * 100 if len(data) > 0 else 0
-
-            # Calculate DNM counts and fit regression
-            dnm_counts = filtered.count_by_sample().rename('dnm_count').reset_index()
-            regression_data = parental_info.merge(dnm_counts, on='SAMPLE', how='left')
-            # Filter out samples with missing parental ages for optimization
-            regression_data = regression_data.dropna(subset=['paternal_age', 'maternal_age'])
-            regression_data['dnm_count'] = regression_data['dnm_count'].fillna(0)
-
-            # Fit regression to get actual coefficients
-            model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
-            fitted_coeffs = dict(zip(model.params.index, model.params.values))
-            target_coeffs = dict(zip(model.params.index, targets))
-
-            logger.info(f"  Retention: {len(filtered)}/{len(data)} variants ({retention_rate:.1f}%)")
-            logger.info(f"  Samples: {len(regression_data)} with DNM counts")
-            logger.info(f"  Target coefficients: {', '.join([f'{k}={v:.4f}' for k, v in target_coeffs.items()])}")
-            logger.info(f"  Fitted coefficients: {', '.join([f'{k}={v:.4f}' for k, v in fitted_coeffs.items()])}")
-
-            # Calculate and log absolute and relative errors
-            errors = {k: fitted_coeffs[k] - target_coeffs[k] for k in target_coeffs.keys()}
-            relative_errors = {k: (fitted_coeffs[k] - target_coeffs[k]) / target_coeffs[k] * 100
-                             for k in target_coeffs.keys()}
-
-            # Show optimization weights
-            weights = self.config.optimisation.regression_weights
-            weight_strs = []
-            for i, key in enumerate(model.params.index):
-                weight = weights[i] if i < len(weights) else 1.0
-                weight_strs.append(f"{key} (weight={weight})")
-            logger.info(f"  Optimization weights: {', '.join(weight_strs)}")
-
-            logger.info(f"  Absolute errors: {', '.join([f'{k}={v:+.4f}' for k, v in errors.items()])}")
-            logger.info(f"  Relative errors: {', '.join([f'{k}={v:+.1f}%' for k, v in relative_errors.items()])}")
-
-        except Exception as e:
-            logger.debug(f"Could not compute detailed statistics: {e}")
-
+        
+        # Log best params details
+        self._log_best_params(study, arrays)
+        
         return study.best_params, study.best_value
     
-    def _suggest_params(
+    def _log_best_params(self, study: optuna.Study, arrays: OptimisationArrays):
+        """Log details about the best parameters found."""
+        try:
+            best_params = study.best_params
+            mask = apply_filters_mask(arrays, best_params)
+            n_retained = mask.sum()
+            retention_rate = n_retained / arrays.n_variants * 100
+            
+            logger.info(f"  Retention: {n_retained}/{arrays.n_variants} variants ({retention_rate:.1f}%)")
+            logger.info(f"  Best params: {best_params}")
+        except Exception as e:
+            logger.debug(f"Could not log best params: {e}")
+    
+    def _suggest_params_for_arrays(
         self,
         trial: optuna.Trial,
-        data: VariantDataset,
+        arrays: OptimisationArrays,
         var_type: str
     ) -> Dict[str, Any]:
-        """Suggest filtering parameters based on data distribution.
-
-        Args:
-            trial: Optuna trial for suggesting parameters
-            data: Variant dataset (already filtered by type)
-            var_type: Variant type being optimized (SNV, Insertion, Deletion)
-
-        Returns:
-            Dictionary of suggested filter parameters
-        """
+        """Suggest parameters using pre-extracted arrays."""
         params = {}
-
-        # Get columns to optimize for this specific variant type
+        
         opt_columns = self.config.optimisation.get_optimisation_columns_for_variant_type(var_type)
         if not opt_columns:
             return params
-
-        # Check if using CMA-ES sampler (doesn't support discrete parameters)
+        
         is_cmaes = self.config.stage3.sampler == 'cmaes'
-
-        # Build set of columns that are linked (not the first in their group)
-        # These should NOT be suggested independently
+        
+        # Build skip columns for linked groups
         linked_groups = self.config.optimisation.get_linked_column_groups()
         skip_columns = set()
         for group in linked_groups:
             if len(group) >= 2:
-                # Skip all columns except the first one
                 for col_config in group[1:]:
                     skip_columns.add(col_config.name)
-
-        # Suggest parameters for each column using configuration
+        
         for col_config in opt_columns:
             col = col_config.name
-
-            # Skip linked columns (they'll be set to match the first column)
+            
             if col in skip_columns:
                 continue
-
-            # For computed columns, bounds must come from range_constraint
-            # For non-computed columns, check if column exists in data
-            if not col_config.computed and col not in data.variants.columns:
+            
+            # Check if column exists in arrays
+            if not col_config.computed and col not in arrays.filter_arrays:
                 continue
-
-            # Get data bounds for non-computed columns
-            # For computed columns, we'll use explicit bounds from range_constraint
-            if not col_config.computed:
-                col_data = pd.to_numeric(data.variants[col], errors='coerce').dropna()
+            
+            # Get bounds
+            if col_config.range_constraint:
+                lower = col_config.range_constraint.min
+                upper = col_config.range_constraint.max
+            elif col_config.computed:
+                continue
+            else:
+                col_data = arrays.filter_arrays[col]
+                col_data = col_data[~np.isnan(col_data)]
                 if len(col_data) == 0:
                     continue
-            else:
-                col_data = None  # Not used for computed columns
-
-            # Use optimization type from configuration
+                
+                if col_config.optimisation == 'minimum':
+                    lower = float(np.nanpercentile(col_data, 10))
+                    upper = float(np.nanmax(col_data))
+                else:  # maximum
+                    lower = float(np.nanmin(col_data))
+                    upper = float(np.nanpercentile(col_data, 90))
+            
+            if trial.number == 0:
+                prefix = 'max' if col_config.optimisation == 'minimum' else 'min'
+                logger.info(f"  {prefix}_{col} search space: [{lower:.2f}, {upper:.2f}]")
+            
+            # Suggest value
             if col_config.optimisation == 'minimum':
-                # Keep LOW values: suggest maximum threshold (filter out values above this)
-                if col_config.range_constraint:
-                    # Use explicit bounds from range_constraint (for both computed and regular columns)
-                    lower = col_config.range_constraint.min
-                    upper = col_config.range_constraint.max
-                    if trial.number == 0:
-                        logger.info(f"  max_{col} search space: [{lower}, {upper}] (from range_constraint)")
-                elif col_config.computed:
-                    # For computed columns without range_constraint, skip
-                    logger.warning(f"Skipping computed column {col}: no range_constraint specified")
-                    continue
-                else:
-                    # For regular columns without range_constraint, use data quantiles
-                    lower = col_data.quantile(0.1)
-                    upper = col_data.max()
-                    if trial.number == 0:
-                        logger.info(f"  max_{col} search space: [{lower:.2f}, {upper:.2f}] (from data quantiles)")
-
                 if col_config.dtype == 'int' and not is_cmaes:
                     params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower), int(upper))
                 else:
-                    # Use float for CMA-ES or if dtype is float
                     value = trial.suggest_float(f'max_{col}', float(lower), float(upper))
+                    # Clip to bounds for CMA-ES (it can sample outside bounds)
+                    value = max(lower, min(upper, value))
                     params[f'max_{col}'] = int(round(value)) if col_config.dtype == 'int' else value
-
+            
             elif col_config.optimisation == 'maximum':
-                # Keep HIGH values: suggest minimum threshold (filter out values below this)
-                if col_config.range_constraint:
-                    # Use explicit bounds from range_constraint (for both computed and regular columns)
-                    lower = col_config.range_constraint.min
-                    upper = col_config.range_constraint.max
-                    if trial.number == 0:
-                        logger.info(f"  min_{col} search space: [{lower}, {upper}] (from range_constraint)")
-                elif col_config.computed:
-                    # For computed columns without range_constraint, skip
-                    logger.warning(f"Skipping computed column {col}: no range_constraint specified")
-                    continue
-                else:
-                    # For regular columns without range_constraint, use data quantiles
-                    lower = col_data.min()
-                    upper = col_data.quantile(0.9)
-                    if trial.number == 0:
-                        logger.info(f"  min_{col} search space: [{lower:.2f}, {upper:.2f}] (from data quantiles)")
-
                 if col_config.dtype == 'int' and not is_cmaes:
                     params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower), int(upper))
                 else:
-                    # Use float for CMA-ES or if dtype is float
                     value = trial.suggest_float(f'min_{col}', float(lower), float(upper))
+                    # Clip to bounds for CMA-ES
+                    value = max(lower, min(upper, value))
                     params[f'min_{col}'] = int(round(value)) if col_config.dtype == 'int' else value
-
+            
             elif col_config.optimisation == 'range':
-                # Range: handle symmetric vs regular range constraints
-                if col_config.range_constraint:
-                    # Check if it's a symmetric range constraint (has 'lower' and 'scale')
-                    if hasattr(col_config.range_constraint, 'lower') and hasattr(col_config.range_constraint, 'scale'):
-                        # Symmetric range: suggest only lower, calculate upper as scale - lower
-                        lower_bound = col_config.range_constraint.lower
-                        upper_bound = col_config.range_constraint.scale - col_config.range_constraint.lower
-
-                        if col_config.dtype == 'int' and not is_cmaes:
-                            suggested_lower = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
-                        else:
-                            value = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
-                            suggested_lower = int(round(value)) if col_config.dtype == 'int' else value
-
-                        # Calculate symmetric upper bound
-                        suggested_upper = col_config.range_constraint.scale - suggested_lower
-                        params[f'min_{col}'] = suggested_lower
-                        params[f'max_{col}'] = suggested_upper
-                    else:
-                        # Regular range: suggest both min and max independently
-                        lower_bound = col_config.range_constraint.min
-                        upper_bound = col_config.range_constraint.max
-
-                        if col_config.dtype == 'int' and not is_cmaes:
-                            params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
-                            params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower_bound), int(upper_bound))
-                        else:
-                            value_min = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
-                            value_max = trial.suggest_float(f'max_{col}', float(lower_bound), float(upper_bound))
-                            if col_config.dtype == 'int':
-                                params[f'min_{col}'] = int(round(value_min))
-                                params[f'max_{col}'] = int(round(value_max))
-                            else:
-                                params[f'min_{col}'] = value_min
-                                params[f'max_{col}'] = value_max
-                else:
-                    # No constraint: use data bounds
-                    lower_bound = col_data.min()
-                    upper_bound = col_data.max()
-
+                if hasattr(col_config.range_constraint, 'lower') and hasattr(col_config.range_constraint, 'scale'):
+                    # Symmetric range
+                    lower_bound = col_config.range_constraint.lower
+                    upper_bound = col_config.range_constraint.scale - col_config.range_constraint.lower
+                    
                     if col_config.dtype == 'int' and not is_cmaes:
-                        params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
-                        params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower_bound), int(upper_bound))
+                        suggested_lower = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
                     else:
-                        value_min = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
-                        value_max = trial.suggest_float(f'max_{col}', float(lower_bound), float(upper_bound))
+                        value = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
+                        # Clip to bounds for CMA-ES
+                        value = max(lower_bound, min(upper_bound, value))
+                        suggested_lower = int(round(value)) if col_config.dtype == 'int' else value
+                    
+                    suggested_upper = col_config.range_constraint.scale - suggested_lower
+                    params[f'min_{col}'] = suggested_lower
+                    params[f'max_{col}'] = suggested_upper
+                else:
+                    # Regular range
+                    if col_config.dtype == 'int' and not is_cmaes:
+                        params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower), int(upper))
+                        params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower), int(upper))
+                    else:
+                        value_min = trial.suggest_float(f'min_{col}', float(lower), float(upper))
+                        value_max = trial.suggest_float(f'max_{col}', float(lower), float(upper))
+                        # Clip to bounds for CMA-ES
+                        value_min = max(lower, min(upper, value_min))
+                        value_max = max(lower, min(upper, value_max))
                         if col_config.dtype == 'int':
                             params[f'min_{col}'] = int(round(value_min))
                             params[f'max_{col}'] = int(round(value_max))
                         else:
                             params[f'min_{col}'] = value_min
                             params[f'max_{col}'] = value_max
-
-        # Handle linked columns - copy first column's value to linked columns
+        
+        # Handle linked columns
         for group in linked_groups:
             if len(group) < 2:
                 continue
-
-            # Find parameters for the first column in the group
+            
             first_col = group[0].name
             param_keys = [k for k in params.keys() if k.endswith(f'_{first_col}')]
-
-            if param_keys:
-                # Copy the first column's value to all linked columns
-                for key in param_keys:
-                    param_value = params[key]
-                    prefix = key.split('_')[0]  # 'min' or 'max'
-
-                    # Apply same value to all linked columns
-                    for linked_col in group[1:]:
-                        linked_key = f'{prefix}_{linked_col.name}'
-                        params[linked_key] = param_value
-
+            
+            for key in param_keys:
+                param_value = params[key]
+                prefix = key.split('_')[0]
+                
+                for linked_col in group[1:]:
+                    linked_key = f'{prefix}_{linked_col.name}'
+                    params[linked_key] = param_value
+        
         return params
+
+
+# Alias for backward compatibility
+OptimisationPipeline = MemoryEfficientPipeline

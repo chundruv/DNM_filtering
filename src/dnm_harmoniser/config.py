@@ -177,6 +177,8 @@ class SymmetricRangeConstraint(BaseModel):
 
 class ColumnConfig(BaseModel):
     """Configuration for a single column to optimise."""
+    model_config = {"populate_by_name": True}  # Accept both 'range' and 'range_constraint'
+    
     name: str = Field(..., description="Column name in the dataframe")
     dtype: Literal["int", "float", "str"] = Field(..., description="Data type of the column")
     optimisation: Literal["minimum", "maximum", "range", "none"] = Field(
@@ -185,6 +187,7 @@ class ColumnConfig(BaseModel):
     )
     range_constraint: Optional[Union[RangeConstraint, SymmetricRangeConstraint]] = Field(
         None,
+        alias="range",
         description="Range constraint (required if optimisation='range'). Use RangeConstraint for explicit min/max, or SymmetricRangeConstraint for symmetric bounds."
     )
     linked_to: Optional[str] = Field(
@@ -270,6 +273,19 @@ class OptimisationConfig(BaseModel):
     )
     regression_formula: str = "dnm_count ~ paternal_age"
     regression_weights: List[float] = [1.0, 1.0]
+    regression_weights_by_type: Optional[Dict[str, List[float]]] = Field(
+        None,
+        description="Optional variant-type specific weights. Overrides regression_weights for specified types. Example: {'Insertion': [0.05, 1.0], 'Deletion': [0.05, 1.0]}"
+    )
+    
+    def get_regression_weights(self, variant_type: str) -> List[float]:
+        """Get regression weights for a specific variant type.
+        
+        Returns variant-specific weights if defined, otherwise falls back to default.
+        """
+        if self.regression_weights_by_type and variant_type in self.regression_weights_by_type:
+            return self.regression_weights_by_type[variant_type]
+        return self.regression_weights
 
     @model_validator(mode='after')
     def validate_linked_columns(self):

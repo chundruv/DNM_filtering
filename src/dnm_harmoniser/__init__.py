@@ -16,8 +16,7 @@ from .config import (
     ColumnConfig,
     OptimisationConfig
 )
-from .pipeline import OptimisationPipeline
-from .pipeline_memory_efficient import MemoryEfficientPipeline
+from .pipeline import OptimisationPipeline, MemoryEfficientPipeline
 from .data import VariantDataset
 from .plotting import plot_optimization_results, apply_filters_from_params, save_parameters
 
