@@ -277,6 +277,34 @@ class OptimisationConfig(BaseModel):
         None,
         description="Optional variant-type specific weights. Overrides regression_weights for specified types. Example: {'Insertion': [0.05, 1.0], 'Deletion': [0.05, 1.0]}"
     )
+    loss_function: Literal[
+        "weighted_mse",
+        "absolute", 
+        "huber",
+        "log_ratio",
+        "slope_priority",
+        "asymmetric",
+        "max_slope"
+    ] = Field(
+        "weighted_mse",
+        description="Loss function for optimization. Options: weighted_mse (default), absolute, huber, log_ratio, slope_priority, asymmetric, max_slope"
+    )
+    loss_function_by_type: Optional[Dict[str, str]] = Field(
+        None,
+        description="Optional variant-type specific loss functions. Example: {'SNV': 'max_slope', 'Insertion': 'weighted_mse'}"
+    )
+    huber_delta: float = Field(
+        0.1,
+        description="Delta parameter for Huber loss - errors below this use quadratic, above use linear"
+    )
+    asymmetric_penalty: float = Field(
+        3.0,
+        description="Multiplier for undershooting penalty in asymmetric loss (slope < target penalized more)"
+    )
+    intercept_tolerance: float = Field(
+        0.5,
+        description="For slope_priority/max_slope: allowed intercept deviation (as fraction) before penalty kicks in"
+    )
     
     def get_regression_weights(self, variant_type: str) -> List[float]:
         """Get regression weights for a specific variant type.
@@ -286,6 +314,15 @@ class OptimisationConfig(BaseModel):
         if self.regression_weights_by_type and variant_type in self.regression_weights_by_type:
             return self.regression_weights_by_type[variant_type]
         return self.regression_weights
+    
+    def get_loss_function(self, variant_type: str) -> str:
+        """Get loss function for a specific variant type.
+        
+        Returns variant-specific loss function if defined, otherwise falls back to default.
+        """
+        if self.loss_function_by_type and variant_type in self.loss_function_by_type:
+            return self.loss_function_by_type[variant_type]
+        return self.loss_function
 
     @model_validator(mode='after')
     def validate_linked_columns(self):

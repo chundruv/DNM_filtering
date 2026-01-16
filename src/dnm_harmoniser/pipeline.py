@@ -20,7 +20,13 @@ from pathlib import Path
 
 from .config import PipelineConfig
 from .data import VariantDataset
-from .plotting import plot_optimization_results, save_parameters
+from .plotting import (
+    plot_optimization_results, 
+    save_parameters,
+    plot_optuna_diagnostics,
+    plot_regression_trajectory,
+    plot_optimization_summary,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -33,7 +39,9 @@ class OptimisationResult:
     best_scores: Dict[str, float]
     warmup_params: Optional[Dict[str, Dict[str, Any]]]
     n_individuals_removed: int
-    study: Optional[optuna.Study]
+    studies: Optional[Dict[str, optuna.Study]]  # Studies per variant type
+    trial_history: Optional[Dict[str, List[Dict[str, Any]]]]  # Trial history per variant type
+    targets: Optional[Dict[str, Dict[str, float]]]  # Target slope/intercept per variant type
     
     @property
     def summary(self) -> str:
@@ -117,7 +125,8 @@ def extract_optimisation_arrays(
             paternal_ages[idx] = sample_ages.loc[sample, 'paternal_age']
             maternal_ages[idx] = sample_ages.loc[sample, 'maternal_age']
     
-    valid_age_mask = ~(np.isnan(paternal_ages) | np.isnan(maternal_ages))
+    # Only require valid paternal age (maternal age not used in optimization)
+    valid_age_mask = ~np.isnan(paternal_ages)
     
     return OptimisationArrays(
         sample_ids=sample_ids,
@@ -302,7 +311,9 @@ class MemoryEfficientPipeline:
             best_scores=scores,
             warmup_params=warmup_params if warmup_params else None,
             n_individuals_removed=n_removed,
-            study=None
+            studies=self._studies if hasattr(self, '_studies') else None,
+            trial_history=self._trial_history if hasattr(self, '_trial_history') else None,
+            targets=self._targets_dict if hasattr(self, '_targets_dict') else None,
         )
 
         # Generate plots if requested
@@ -323,6 +334,22 @@ class MemoryEfficientPipeline:
                     save_filtered=True
                 )
                 save_parameters(final_params, output_dir)
+                
+                # Generate Optuna diagnostic plots
+                if hasattr(self, '_studies') and self._studies:
+                    try:
+                        plot_optuna_diagnostics(self._studies, output_dir)
+                    except Exception as e:
+                        logger.warning(f"Failed to generate Optuna diagnostics: {e}")
+                
+                # Generate regression trajectory plots
+                if hasattr(self, '_trial_history') and self._trial_history and hasattr(self, '_targets_dict'):
+                    try:
+                        plot_regression_trajectory(self._trial_history, self._targets_dict, output_dir)
+                        plot_optimization_summary(self._studies, self._trial_history, self._targets_dict, output_dir)
+                    except Exception as e:
+                        logger.warning(f"Failed to generate trajectory plots: {e}")
+                        
             except Exception as e:
                 logger.warning(f"Failed to generate plots: {e}")
 
@@ -339,7 +366,11 @@ class MemoryEfficientPipeline:
             pass
     
     def _calculate_targets(self, reference: VariantDataset) -> Dict[str, np.ndarray]:
-        """Calculate regression targets from reference data."""
+        """Calculate regression targets from reference data.
+        
+        Uses paternal_age only regression: dnm_count ~ paternal_age
+        Returns coefficients as [Intercept, paternal_age_slope]
+        """
         targets = {}
         
         for var_type in self.config.optimisation.variant_types:
@@ -353,16 +384,17 @@ class MemoryEfficientPipeline:
             # Count DNMs per sample
             counts = ref_subset.groupby('SAMPLE').size().rename('dnm_count').reset_index()
 
-            # Get parental ages
-            ages = ref_subset[['SAMPLE', 'paternal_age', 'maternal_age']].drop_duplicates()
+            # Get paternal ages (only need paternal_age now)
+            ages = ref_subset[['SAMPLE', 'paternal_age']].drop_duplicates()
             regression_data = ages.merge(counts, on='SAMPLE', how='left')
-            regression_data = regression_data.dropna(subset=['paternal_age', 'maternal_age'])
+            regression_data = regression_data.dropna(subset=['paternal_age'])
             regression_data['dnm_count'] = regression_data['dnm_count'].fillna(0)
             
             try:
-                model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
-                targets[var_type] = model.params.values
-                logger.info(f"Calculated targets for {var_type}: {model.params.to_dict()}")
+                # Use paternal_age only formula
+                model = smf.ols('dnm_count ~ paternal_age', data=regression_data).fit()
+                targets[var_type] = model.params.values  # [Intercept, paternal_age]
+                logger.info(f"Reference targets for {var_type}: intercept={model.params['Intercept']:.4f}, slope={model.params['paternal_age']:.4f}")
             except Exception as e:
                 logger.warning(f"Failed to calculate targets for {var_type}: {e}")
         
@@ -458,7 +490,7 @@ class MemoryEfficientPipeline:
             arrays = extract_optimisation_arrays(var_df, filter_columns)
             
             # Run optimization with parallel trials
-            params, _ = self._optimize_with_arrays(
+            params, _, _, _ = self._optimize_with_arrays(
                 arrays,
                 targets[var_type],
                 self.config.stage1.n_trials,
@@ -637,6 +669,18 @@ class MemoryEfficientPipeline:
         scores = {}
         is_cmaes = self.config.stage3.sampler == 'cmaes'
         
+        # Initialize storage for studies and trial history
+        self._studies = {}
+        self._trial_history = {}
+        self._targets_dict = {}
+        
+        # Convert targets to dict format for plotting
+        for var_type, target_arr in targets.items():
+            self._targets_dict[var_type] = {
+                'intercept': target_arr[0],
+                'slope': target_arr[1] if len(target_arr) > 1 else 0
+            }
+        
         for var_type in targets:
             logger.info(f"Processing {var_type}...")
             
@@ -665,7 +709,7 @@ class MemoryEfficientPipeline:
             arrays = extract_optimisation_arrays(var_df, filter_columns)
             
             # Run optimization with parallel trials
-            params, best_score = self._optimize_with_arrays(
+            params, best_score, study, trial_hist = self._optimize_with_arrays(
                 arrays,
                 targets[var_type],
                 self.config.stage3.n_trials,
@@ -677,6 +721,8 @@ class MemoryEfficientPipeline:
             if params:
                 final_params[var_type] = params
                 scores[var_type] = best_score
+                self._studies[var_type] = study
+                self._trial_history[var_type] = trial_hist
             
             # Explicit cleanup
             del arrays
@@ -684,7 +730,7 @@ class MemoryEfficientPipeline:
             self._log_memory_usage(f"After {var_type} full optimisation")
         
         return final_params, scores
-    
+
     def _optimize_with_arrays(
         self,
         arrays: OptimisationArrays,
@@ -693,99 +739,214 @@ class MemoryEfficientPipeline:
         study_name: str,
         var_type: str,
         use_pruning: bool = False
-    ) -> Tuple[Optional[Dict[str, Any]], float]:
-        """Optimize using pre-extracted numpy arrays (memory efficient).
+    ) -> Tuple[Optional[Dict[str, Any]], float, Optional[optuna.Study], List[Dict[str, Any]]]:
+        """
+        Optimize filter parameters to match reference regression coefficients.
         
-        Uses Optuna's n_jobs for parallel trial evaluation via multiprocessing.
+        This method directly optimizes the slope and intercept of the 
+        dnm_count ~ paternal_age regression to match reference values.
+        
+        Returns:
+            Tuple of (best_params, best_score, study, trial_history)
         """
         
-        if arrays.n_variants == 0:
-            return None, float('inf')
+        trial_history = []
         
-        # Pre-compute regression data structure (only samples with valid ages)
+        if arrays.n_variants == 0:
+            return None, float('inf'), None, trial_history
+        
+        # 1. Setup: Identify samples with valid ages
         valid_sample_indices = np.where(arrays.valid_age_mask)[0]
         n_valid_samples = len(valid_sample_indices)
         
-        if n_valid_samples < 3:
+        if n_valid_samples < 10:
             logger.warning(f"Not enough samples with valid ages: {n_valid_samples}")
-            return None, float('inf')
+            return None, float('inf'), None, trial_history
         
-        # Pre-extract ages for valid samples
-        valid_paternal_ages = arrays.paternal_ages[valid_sample_indices]
-        valid_maternal_ages = arrays.maternal_ages[valid_sample_indices]
+        # 2. Extract Reference Coefficients
+        # Assumes targets are [Intercept, Paternal_Slope, ...]
+        ref_intercept = targets[0]
+        ref_pat_slope = targets[1] if len(targets) > 1 else 0
         
+        # Get weights from config [intercept_weight, slope_weight]
+        weights = self.config.optimisation.get_regression_weights(var_type)
+        intercept_weight = weights[0] if len(weights) > 0 else 1.0
+        slope_weight = weights[1] if len(weights) > 1 else 1.0
+        
+        # Get loss function from config
+        loss_fn = self.config.optimisation.get_loss_function(var_type)
+        huber_delta = self.config.optimisation.huber_delta
+        asymmetric_penalty = self.config.optimisation.asymmetric_penalty
+        intercept_tolerance = self.config.optimisation.intercept_tolerance
+        
+        logger.info(f"  Reference targets: intercept={ref_intercept:.4f}, slope={ref_pat_slope:.4f}")
+        logger.info(f"  === LOSS CONFIG ===")
+        logger.info(f"      Loss function: {loss_fn}")
+        logger.info(f"      Weights: intercept={intercept_weight:.2f}, slope={slope_weight:.2f}")
+        if loss_fn == "huber":
+            logger.info(f"      Huber delta: {huber_delta}")
+        elif loss_fn == "asymmetric":
+            logger.info(f"      Asymmetric penalty: {asymmetric_penalty}x")
+        elif loss_fn in ("slope_priority", "max_slope"):
+            logger.info(f"      Intercept tolerance: {intercept_tolerance:.1%}")
+        logger.info(f"  ====================")
+
+        # 3. Pre-extract paternal ages for valid samples
+        valid_pat_ages = arrays.paternal_ages[valid_sample_indices]
+        
+        # Pre-compute values for fast OLS
+        pat_mean = np.mean(valid_pat_ages)
+        pat_centered = valid_pat_ages - pat_mean
+        pat_var_sum = np.sum(pat_centered ** 2)
+
         def objective(trial):
-            # Suggest parameters
+            # A. Suggest Parameters
             params = self._suggest_params_for_arrays(trial, arrays, var_type)
             
-            # Apply filters using boolean mask (no copy!)
+            # B. Apply Filters
             mask = apply_filters_mask(arrays, params)
-            n_retained = mask.sum()
             
-            if n_retained == 0:
-                return float('inf')
-            
-            # Count per sample using fast numpy bincount
+            # C. Count variants per sample
             counts = count_per_sample_fast(arrays.sample_ids, mask, arrays.n_samples)
-            
-            # Get counts for valid samples only
             valid_counts = counts[valid_sample_indices].astype(np.float64)
             
-            # Check if we have enough variation
+            # D. Check for degenerate solutions
             if valid_counts.sum() == 0:
-                return float('inf')
+                return 1e9
             
-            try:
-                # Build regression data (reuse pre-allocated arrays)
-                regression_data = pd.DataFrame({
-                    'dnm_count': valid_counts,
-                    'paternal_age': valid_paternal_ages,
-                    'maternal_age': valid_maternal_ages
-                })
+            # E. Fast OLS: dnm_count ~ paternal_age
+            count_mean = np.mean(valid_counts)
+            count_centered = valid_counts - count_mean
+            
+            # slope = cov(x,y) / var(x)
+            slope = np.sum(pat_centered * count_centered) / pat_var_sum
+            intercept = count_mean - slope * pat_mean
+            
+            # F. Calculate loss based on selected loss function
+            # Normalized errors (used by most loss functions)
+            slope_rel_error = (slope - ref_pat_slope) / ref_pat_slope if ref_pat_slope != 0 else slope
+            intercept_rel_error = (intercept - ref_intercept) / ref_intercept if ref_intercept != 0 else intercept
+            
+            if loss_fn == "weighted_mse":
+                # Default: weighted mean squared error of normalized values
+                slope_error = slope_rel_error ** 2
+                intercept_error = intercept_rel_error ** 2
+                loss = intercept_weight * intercept_error + slope_weight * slope_error
                 
-                # Fit regression
-                model = smf.ols(self.config.optimisation.regression_formula, data=regression_data).fit()
-                fitted_intercept = model.params.values[0]
-                fitted_slope = model.params.values[1] if len(model.params.values) > 1 else 0
-                target_intercept = targets[0]
-                target_slope = targets[1] if len(targets) > 1 else 0
+            elif loss_fn == "absolute":
+                # L1 loss - less sensitive to large deviations
+                slope_error = abs(slope_rel_error)
+                intercept_error = abs(intercept_rel_error)
+                loss = intercept_weight * intercept_error + slope_weight * slope_error
                 
-                # Calculate loss using relative error
-                weights = self.config.optimisation.get_regression_weights(var_type)
-                intercept_weight = weights[0] if len(weights) > 0 else 1.0
-                slope_weight = weights[1] if len(weights) > 1 else 1.0
+            elif loss_fn == "huber":
+                # Huber loss - quadratic for small errors, linear for large
+                def huber(x, delta):
+                    if abs(x) <= delta:
+                        return 0.5 * x ** 2
+                    else:
+                        return delta * (abs(x) - 0.5 * delta)
+                slope_error = huber(slope_rel_error, huber_delta)
+                intercept_error = huber(intercept_rel_error, huber_delta)
+                loss = intercept_weight * intercept_error + slope_weight * slope_error
                 
-                slope_rel_error = (fitted_slope - target_slope) / (np.abs(target_slope) + 1e-10)
-                intercept_rel_error = (fitted_intercept - target_intercept) / (np.abs(target_intercept) + 1e-10)
+            elif loss_fn == "log_ratio":
+                # Log ratio - good when values span orders of magnitude
+                # Avoid log of negative/zero
+                if slope > 0 and ref_pat_slope > 0:
+                    slope_error = (np.log(slope) - np.log(ref_pat_slope)) ** 2
+                else:
+                    slope_error = slope_rel_error ** 2
+                if intercept > 0 and ref_intercept > 0:
+                    intercept_error = (np.log(intercept) - np.log(ref_intercept)) ** 2
+                else:
+                    intercept_error = intercept_rel_error ** 2
+                loss = intercept_weight * intercept_error + slope_weight * slope_error
                 
-                total_loss = (intercept_weight * intercept_rel_error ** 2) + (slope_weight * slope_rel_error ** 2)
+            elif loss_fn == "slope_priority":
+                # Optimize slope first, only penalize intercept if way off
+                slope_error = slope_rel_error ** 2
+                # Soft constraint on intercept - only penalize if outside tolerance
+                intercept_deviation = abs(intercept_rel_error)
+                if intercept_deviation > intercept_tolerance:
+                    intercept_error = (intercept_deviation - intercept_tolerance) ** 2
+                else:
+                    intercept_error = 0
+                loss = slope_weight * slope_error + intercept_weight * intercept_error
                 
-                if use_pruning and trial.number > 0:
-                    trial.report(total_loss, trial.number)
-                    if trial.should_prune():
-                        raise optuna.TrialPruned()
+            elif loss_fn == "asymmetric":
+                # Penalize undershooting slope more than overshooting
+                slope_error = slope_rel_error ** 2
+                if slope < ref_pat_slope:
+                    # Undershooting - apply extra penalty
+                    slope_error *= asymmetric_penalty
+                intercept_error = intercept_rel_error ** 2
+                loss = intercept_weight * intercept_error + slope_weight * slope_error
                 
-                return total_loss
+            elif loss_fn == "max_slope":
+                # Maximize slope with soft intercept constraint
+                # Negative slope means we want to maximize it
+                slope_loss = -slope / ref_pat_slope  # Negative to maximize
                 
-            except Exception as e:
-                logger.debug(f"Trial {trial.number}: Regression failed: {e}")
-                return float('inf')
+                # Add penalty if intercept deviates too much
+                intercept_deviation = abs(intercept_rel_error)
+                if intercept_deviation > intercept_tolerance:
+                    intercept_penalty = intercept_weight * (intercept_deviation - intercept_tolerance) ** 2
+                else:
+                    intercept_penalty = 0
+                
+                loss = slope_weight * slope_loss + intercept_penalty
+                # For tracking, use absolute values
+                slope_error = slope_rel_error ** 2
+                intercept_error = intercept_rel_error ** 2
+                
+            elif loss_fn == "correlation":
+                # Maximize correlation between filtered counts and paternal age
+                # This directly measures how well the paternal age effect is preserved
+                if np.std(valid_counts) > 0:
+                    corr = np.corrcoef(valid_counts, valid_pat_ages)[0, 1]
+                    if np.isnan(corr):
+                        corr = 0
+                else:
+                    corr = 0
+                
+                # Transform to loss: (1 - corr) so perfect correlation = 0, no correlation = 1
+                # This keeps loss positive and intuitive
+                loss = 1 - corr
+                
+                # For tracking
+                slope_error = slope_rel_error ** 2
+                intercept_error = intercept_rel_error ** 2
+                
+            else:
+                # Fallback to weighted_mse
+                slope_error = slope_rel_error ** 2
+                intercept_error = intercept_rel_error ** 2
+                loss = intercept_weight * intercept_error + slope_weight * slope_error
+            
+            # G. Track trial history for plotting
+            trial_history.append({
+                'trial_number': trial.number,
+                'slope': slope,
+                'intercept': intercept,
+                'loss': loss,
+                'slope_error': slope_error,
+                'intercept_error': intercept_error,
+            })
+            
+            return loss
         
         # Create study
         sampler_map = {
-            'tpe': optuna.samplers.TPESampler(seed=self.config.seed, multivariate=self.config.stage3.multivariate),
+            'tpe': optuna.samplers.TPESampler(seed=self.config.seed, multivariate=True), # Multivariate helps TPE find correlations
             'cmaes': optuna.samplers.CmaEsSampler(seed=self.config.seed),
             'random': optuna.samplers.RandomSampler(seed=self.config.seed)
         }
         
-        pruner_map = {
-            'successive_halving': optuna.pruners.SuccessiveHalvingPruner(min_resource=1, reduction_factor=3),
-            'hyperband': optuna.pruners.HyperbandPruner(),
-            'median': optuna.pruners.MedianPruner()
-        }
-        
         sampler = sampler_map.get(self.config.stage3.sampler, optuna.samplers.TPESampler(seed=self.config.seed))
-        pruner = pruner_map.get(self.config.stage3.pruner) if use_pruning else None
+        
+        # Disable pruner for stability unless explicitly requested and safe
+        pruner = None 
         
         study = optuna.create_study(
             direction='minimize',
@@ -794,26 +955,38 @@ class MemoryEfficientPipeline:
             study_name=study_name
         )
         
-        # Run optimisation with parallel trials
-        # Note: n_jobs > 1 uses joblib multiprocessing which requires picklable objectives
-        # The loky backend (joblib default) handles closures via cloudpickle
         n_jobs = self.config.max_workers
+        # Cap workers to avoid overhead on simple objective
         if n_jobs > 1:
-            logger.info(f"  Running {n_trials} trials with {n_jobs} parallel workers...")
+            logger.info(f"  Running {n_trials} trials...")
+            
         study.optimize(
             objective, 
             n_trials=n_trials, 
             n_jobs=n_jobs, 
-            show_progress_bar=(n_jobs == 1)  # Progress bar doesn't work well with multiprocessing
+            show_progress_bar=(n_jobs == 1)
         )
         
-        score_str = f"{study.best_value:.4e}" if study.best_value < 0.01 else f"{study.best_value:.6f}"
-        logger.info(f"Optimisation for {study_name} finished. Best score: {score_str}")
+        # Logging
+        best_loss = study.best_value
+        logger.info(f"Optimisation finished. Best loss: {best_loss:.6f}")
         
-        # Log best params details
+        # Log achieved slope/intercept
+        best_params = study.best_params
+        mask = apply_filters_mask(arrays, best_params)
+        counts = count_per_sample_fast(arrays.sample_ids, mask, arrays.n_samples)
+        valid_counts = counts[valid_sample_indices].astype(np.float64)
+        
+        count_mean = np.mean(valid_counts)
+        count_centered = valid_counts - count_mean
+        achieved_slope = np.sum(pat_centered * count_centered) / pat_var_sum
+        achieved_intercept = count_mean - achieved_slope * pat_mean
+        
+        logger.info(f"  Achieved: intercept={achieved_intercept:.4f} (target={ref_intercept:.4f}), slope={achieved_slope:.4f} (target={ref_pat_slope:.4f})")
+        
         self._log_best_params(study, arrays)
         
-        return study.best_params, study.best_value
+        return study.best_params, study.best_value, study, trial_history
     
     def _log_best_params(self, study: optuna.Study, arrays: OptimisationArrays):
         """Log details about the best parameters found."""
