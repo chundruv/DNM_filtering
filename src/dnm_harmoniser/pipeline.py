@@ -90,32 +90,63 @@ class OptimisationArrays:
 def extract_optimisation_arrays(
     df: pd.DataFrame,
     filter_columns: List[str],
-    sample_col: str = 'SAMPLE'
+    sample_col: str = 'SAMPLE',
+    all_sample_ages: Optional[pd.DataFrame] = None
 ) -> OptimisationArrays:
     """Extract numpy arrays from DataFrame for memory-efficient optimization.
     
     This function extracts only the data needed for the objective function
     as compact numpy arrays, allowing the original DataFrame to be freed.
+    
+    Args:
+        df: DataFrame containing variants (may be empty if no variants of this type)
+        filter_columns: List of column names to extract for filtering
+        sample_col: Name of sample ID column
+        all_sample_ages: Optional DataFrame with columns [SAMPLE, paternal_age, maternal_age]
+                        containing ALL samples to include in regression (even those with
+                        0 variants of this type). If None, samples are derived from df.
     """
-    # Create sample ID mapping
-    unique_samples = df[sample_col].unique()
+    # Create sample ID mapping - use all_sample_ages if provided, otherwise derive from df
+    if all_sample_ages is not None:
+        unique_samples = all_sample_ages['SAMPLE'].unique()
+    else:
+        unique_samples = df[sample_col].unique()
+    
     sample_id_to_idx = {s: i for i, s in enumerate(unique_samples)}
     idx_to_sample_id = {i: s for s, i in sample_id_to_idx.items()}
     n_samples = len(unique_samples)
     
-    # Encode sample IDs as integers
-    sample_ids = df[sample_col].map(sample_id_to_idx).values.astype(np.int32)
+    # Encode sample IDs as integers (only for variants in df)
+    # Samples not in df will have 0 count via bincount
+    if len(df) > 0:
+        # Map sample IDs, using -1 for any samples in df but not in our sample list
+        # (shouldn't happen if all_sample_ages is comprehensive, but be safe)
+        sample_ids = df[sample_col].map(lambda x: sample_id_to_idx.get(x, -1)).values.astype(np.int32)
+        # Filter out any -1 values (samples not in our list)
+        valid_variant_mask = sample_ids >= 0
+        sample_ids = sample_ids[valid_variant_mask]
+    else:
+        sample_ids = np.array([], dtype=np.int32)
+        valid_variant_mask = np.array([], dtype=bool)
     
-    # Extract filter columns
+    # Extract filter columns (only for valid variants)
     filter_arrays = {}
     for col in filter_columns:
         if col in df.columns:
-            # Convert to float32 to save memory
-            filter_arrays[col] = pd.to_numeric(df[col], errors='coerce').values.astype(np.float32)
+            col_data = pd.to_numeric(df[col], errors='coerce').values.astype(np.float32)
+            if len(valid_variant_mask) > 0:
+                filter_arrays[col] = col_data[valid_variant_mask]
+            else:
+                filter_arrays[col] = col_data
     
     # Extract parental ages per sample
-    sample_ages = df[[sample_col, 'paternal_age', 'maternal_age']].drop_duplicates(subset=[sample_col])
-    sample_ages = sample_ages.set_index(sample_col)
+    if all_sample_ages is not None:
+        # Use provided ages
+        sample_ages = all_sample_ages.set_index('SAMPLE')
+    else:
+        # Derive from df
+        sample_ages = df[[sample_col, 'paternal_age', 'maternal_age']].drop_duplicates(subset=[sample_col])
+        sample_ages = sample_ages.set_index(sample_col)
     
     paternal_ages = np.full(n_samples, np.nan, dtype=np.float32)
     maternal_ages = np.full(n_samples, np.nan, dtype=np.float32)
@@ -128,6 +159,9 @@ def extract_optimisation_arrays(
     # Only require valid paternal age (maternal age not used in optimization)
     valid_age_mask = ~np.isnan(paternal_ages)
     
+    # n_variants is the number of variants we're actually using (after filtering to known samples)
+    n_variants = len(sample_ids)
+    
     return OptimisationArrays(
         sample_ids=sample_ids,
         sample_id_to_idx=sample_id_to_idx,
@@ -137,7 +171,7 @@ def extract_optimisation_arrays(
         paternal_ages=paternal_ages,
         maternal_ages=maternal_ages,
         valid_age_mask=valid_age_mask,
-        n_variants=len(df)
+        n_variants=n_variants
     )
 
 
@@ -370,25 +404,35 @@ class MemoryEfficientPipeline:
         
         Uses paternal_age only regression: dnm_count ~ paternal_age
         Returns coefficients as [Intercept, paternal_age_slope]
+        
+        All samples with valid paternal ages are included in the regression,
+        even if they have 0 variants of a specific type.
         """
         targets = {}
+        
+        # Get ALL samples with valid paternal ages from reference (across all variant types)
+        all_ref_ages = reference.variants[['SAMPLE', 'paternal_age']].drop_duplicates(subset=['SAMPLE'])
+        all_ref_ages = all_ref_ages.dropna(subset=['paternal_age'])
+        logger.info(f"Reference dataset has {len(all_ref_ages)} samples with valid paternal ages")
         
         for var_type in self.config.optimisation.variant_types:
             # Use boolean mask instead of copy
             type_mask = reference.variants['var_type'] == var_type
-            if type_mask.sum() == 0:
-                continue
-            
             ref_subset = reference.variants[type_mask]
             
-            # Count DNMs per sample
-            counts = ref_subset.groupby('SAMPLE').size().rename('dnm_count').reset_index()
+            # Count DNMs per sample (only samples with variants will appear)
+            if len(ref_subset) > 0:
+                counts = ref_subset.groupby('SAMPLE').size().rename('dnm_count').reset_index()
+            else:
+                # No variants of this type - all samples have 0 count
+                counts = pd.DataFrame({'SAMPLE': [], 'dnm_count': []})
 
-            # Get paternal ages (only need paternal_age now)
-            ages = ref_subset[['SAMPLE', 'paternal_age']].drop_duplicates()
-            regression_data = ages.merge(counts, on='SAMPLE', how='left')
-            regression_data = regression_data.dropna(subset=['paternal_age'])
+            # Merge with ALL samples (to include those with 0 variants of this type)
+            regression_data = all_ref_ages.merge(counts, on='SAMPLE', how='left')
             regression_data['dnm_count'] = regression_data['dnm_count'].fillna(0)
+            
+            n_with_variants = (regression_data['dnm_count'] > 0).sum()
+            logger.info(f"Reference {var_type}: {n_with_variants}/{len(regression_data)} samples have >=1 variant")
             
             try:
                 # Use paternal_age only formula
@@ -461,9 +505,16 @@ class MemoryEfficientPipeline:
         """Stage 1: Run warmup optimization for each variant type.
         
         Uses Optuna's n_jobs for parallel trial evaluation within each variant type.
+        All samples with valid ages are included in each variant type's regression,
+        even if they have 0 variants of that type.
         """
         warmup_params = {}
         is_cmaes = self.config.stage3.sampler == 'cmaes'
+        
+        # Get ALL sample ages from the full dataset (no outlier removal yet in warmup)
+        all_sample_ages = data.variants[['SAMPLE', 'paternal_age', 'maternal_age']].drop_duplicates(subset=['SAMPLE'])
+        all_sample_ages = all_sample_ages.dropna(subset=['paternal_age'])  # Must have valid paternal age
+        logger.info(f"Warmup: Total samples for regression (across all types): {len(all_sample_ages)}")
         
         for var_type in targets:
             logger.info(f"Processing {var_type}...")
@@ -475,19 +526,17 @@ class MemoryEfficientPipeline:
             type_mask = data.variants['var_type'] == var_type
             var_df = data.variants[type_mask].copy()
             
-            if len(var_df) == 0:
-                continue
+            # Note: var_df may be empty if no variants of this type exist,
+            # but we still want to include all samples in regression (with 0 counts)
             
             # For CMA-ES, pre-filter based on range constraints
-            if is_cmaes:
+            if is_cmaes and len(var_df) > 0:
                 var_df = self._apply_range_prefilter(var_df, var_type)
-                if len(var_df) == 0:
-                    logger.warning(f"  No variants remaining after range pre-filter for {var_type}")
-                    continue
             
-            # Extract numpy arrays
-            logger.info(f"  Extracting arrays for {len(var_df)} {var_type} variants...")
-            arrays = extract_optimisation_arrays(var_df, filter_columns)
+            # Extract numpy arrays - pass all_sample_ages to include samples with 0 variants
+            n_variants = len(var_df)
+            logger.info(f"  Extracting arrays for {n_variants} {var_type} variants ({len(all_sample_ages)} samples)...")
+            arrays = extract_optimisation_arrays(var_df, filter_columns, all_sample_ages=all_sample_ages)
             
             # Run optimization with parallel trials
             params, _, _, _ = self._optimize_with_arrays(
@@ -664,6 +713,8 @@ class MemoryEfficientPipeline:
         """Stage 3: Run full optimization for each variant type.
         
         Uses Optuna's n_jobs for parallel trial evaluation within each variant type.
+        All non-outlier samples are included in each variant type's regression,
+        even if they have 0 variants of that type.
         """
         final_params = {}
         scores = {}
@@ -681,6 +732,17 @@ class MemoryEfficientPipeline:
                 'slope': target_arr[1] if len(target_arr) > 1 else 0
             }
         
+        # Get ALL sample ages from the full dataset (filtered to non-outliers)
+        # This ensures samples with 0 variants for a specific type are still included
+        if samples_to_keep is not None:
+            all_samples_df = data.variants[data.variants['SAMPLE'].isin(samples_to_keep)]
+        else:
+            all_samples_df = data.variants
+        
+        all_sample_ages = all_samples_df[['SAMPLE', 'paternal_age', 'maternal_age']].drop_duplicates(subset=['SAMPLE'])
+        all_sample_ages = all_sample_ages.dropna(subset=['paternal_age'])  # Must have valid paternal age
+        logger.info(f"Total samples for regression (across all types): {len(all_sample_ages)}")
+        
         for var_type in targets:
             logger.info(f"Processing {var_type}...")
             
@@ -694,19 +756,17 @@ class MemoryEfficientPipeline:
             
             var_df = data.variants[type_mask].copy()
             
-            if len(var_df) == 0:
-                continue
+            # Note: var_df may be empty if no variants of this type exist,
+            # but we still want to include all samples in regression (with 0 counts)
             
             # For CMA-ES, pre-filter based on range constraints
-            if is_cmaes:
+            if is_cmaes and len(var_df) > 0:
                 var_df = self._apply_range_prefilter(var_df, var_type)
-                if len(var_df) == 0:
-                    logger.warning(f"  No variants remaining after range pre-filter for {var_type}")
-                    continue
             
-            # Extract numpy arrays
-            logger.info(f"  Extracting arrays for {len(var_df)} {var_type} variants...")
-            arrays = extract_optimisation_arrays(var_df, filter_columns)
+            # Extract numpy arrays - pass all_sample_ages to include samples with 0 variants
+            n_variants = len(var_df)
+            logger.info(f"  Extracting arrays for {n_variants} {var_type} variants ({len(all_sample_ages)} samples)...")
+            arrays = extract_optimisation_arrays(var_df, filter_columns, all_sample_ages=all_sample_ages)
             
             # Run optimization with parallel trials
             params, best_score, study, trial_hist = self._optimize_with_arrays(

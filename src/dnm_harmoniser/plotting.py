@@ -96,19 +96,33 @@ def plot_optimization_results(
         for age_col, age_label, row_idx in age_types:
             ax = axes[row_idx, col_idx]
 
-            # Reference data (deCODE) - exclude samples with NA ages
-            ref_counts = ref_subset.groupby('SAMPLE').size().rename('dnm_count')
-            ref_ages = ref_subset[['SAMPLE', age_col]].drop_duplicates().set_index('SAMPLE')
-            plot_data_ref = ref_ages.join(ref_counts, how='left')
+            # Reference data (deCODE) - include ALL samples with valid ages,
+            # even those with 0 variants for this type (to match target calculation)
+            all_ref_ages = reference_df[['SAMPLE', age_col]].drop_duplicates().set_index('SAMPLE')
+            all_ref_ages = all_ref_ages.dropna(subset=[age_col])
+            
+            # Count reference variants per sample (only samples with variants will appear)
+            if len(ref_subset) > 0:
+                ref_counts = ref_subset.groupby('SAMPLE').size().rename('dnm_count')
+            else:
+                ref_counts = pd.Series(dtype=float, name='dnm_count')
+            
+            # Join: start with ALL samples (to include those with 0 variants for this type)
+            plot_data_ref = all_ref_ages.join(ref_counts, how='left')
             plot_data_ref['dnm_count'] = plot_data_ref['dnm_count'].fillna(0)
-            plot_data_ref = plot_data_ref.dropna(subset=[age_col])
 
-            # Filtered input data - exclude samples with NA ages
+            # Filtered input data - include ALL samples with valid ages,
+            # even those with 0 variants for this type after filtering (to match optimization)
+            # Get all unique samples from the FULL input data (across all variant types)
+            all_sample_ages = data_df[['SAMPLE', age_col]].drop_duplicates().set_index('SAMPLE')
+            all_sample_ages = all_sample_ages.dropna(subset=[age_col])
+            
+            # Count filtered variants per sample (only samples with variants will appear)
             filt_counts = filtered_data.groupby('SAMPLE').size().rename('dnm_count')
-            filt_ages = filtered_data[['SAMPLE', age_col]].drop_duplicates().set_index('SAMPLE')
-            plot_data_filt = filt_ages.join(filt_counts, how='left')
+            
+            # Join: start with ALL samples (to include those with 0 variants for this type)
+            plot_data_filt = all_sample_ages.join(filt_counts, how='left')
             plot_data_filt['dnm_count'] = plot_data_filt['dnm_count'].fillna(0)
-            plot_data_filt = plot_data_filt.dropna(subset=[age_col])
 
             # Plot scatter points only (no automatic regression lines)
             if len(plot_data_ref) > 0:
