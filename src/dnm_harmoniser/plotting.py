@@ -266,13 +266,17 @@ def apply_filters_from_params(
             col = param[4:]
             
         if col:
-            # NEW: Skip if this column doesn't apply to this variant type
+            # Skip if this column doesn't apply to this variant type
             if col in column_variant_types:
                 if var_type not in column_variant_types[col]:
                     continue  # Skip this filter for this variant type
             
             # 1. Apply to the primary column
             if col in filtered.columns:
+                # Ensure column is numeric before comparison
+                if not pd.api.types.is_numeric_dtype(filtered[col]):
+                    filtered[col] = pd.to_numeric(filtered[col], errors='coerce')
+                
                 if prefix == 'min':
                     filtered = filtered[filtered[col] >= value]
                 elif prefix == 'max':
@@ -282,6 +286,10 @@ def apply_filters_from_params(
             if col in linked_columns:
                 linked_col = linked_columns[col]
                 if linked_col in filtered.columns:
+                    # Ensure linked column is numeric before comparison
+                    if not pd.api.types.is_numeric_dtype(filtered[linked_col]):
+                        filtered[linked_col] = pd.to_numeric(filtered[linked_col], errors='coerce')
+                    
                     if prefix == 'min':
                         filtered = filtered[filtered[linked_col] >= value]
                     elif prefix == 'max':
