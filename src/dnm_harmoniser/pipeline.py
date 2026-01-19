@@ -80,7 +80,6 @@ class OptimisationArrays:
     
     # Parental ages per sample (indexed by sample_idx)
     paternal_ages: np.ndarray  # shape (n_samples,)
-    maternal_ages: np.ndarray  # shape (n_samples,)
     valid_age_mask: np.ndarray  # bool array for samples with valid ages
     
     # Original number of variants
@@ -145,16 +144,14 @@ def extract_optimisation_arrays(
         sample_ages = all_sample_ages.set_index('SAMPLE')
     else:
         # Derive from df
-        sample_ages = df[[sample_col, 'paternal_age', 'maternal_age']].drop_duplicates(subset=[sample_col])
+        sample_ages = df[[sample_col, 'paternal_age']].drop_duplicates(subset=[sample_col])
         sample_ages = sample_ages.set_index(sample_col)
     
     paternal_ages = np.full(n_samples, np.nan, dtype=np.float32)
-    maternal_ages = np.full(n_samples, np.nan, dtype=np.float32)
     
     for sample, idx in sample_id_to_idx.items():
         if sample in sample_ages.index:
             paternal_ages[idx] = sample_ages.loc[sample, 'paternal_age']
-            maternal_ages[idx] = sample_ages.loc[sample, 'maternal_age']
     
     # Only require valid paternal age (maternal age not used in optimization)
     valid_age_mask = ~np.isnan(paternal_ages)
@@ -169,7 +166,6 @@ def extract_optimisation_arrays(
         n_samples=n_samples,
         filter_arrays=filter_arrays,
         paternal_ages=paternal_ages,
-        maternal_ages=maternal_ages,
         valid_age_mask=valid_age_mask,
         n_variants=n_variants
     )
@@ -365,7 +361,8 @@ class MemoryEfficientPipeline:
                     reference_df=reference.variants,
                     best_params=final_params,
                     output_dir=output_dir,
-                    save_filtered=True
+                    save_filtered=True,
+                    config=self.config
                 )
                 save_parameters(final_params, output_dir)
                 
@@ -512,7 +509,7 @@ class MemoryEfficientPipeline:
         is_cmaes = self.config.stage3.sampler == 'cmaes'
         
         # Get ALL sample ages from the full dataset (no outlier removal yet in warmup)
-        all_sample_ages = data.variants[['SAMPLE', 'paternal_age', 'maternal_age']].drop_duplicates(subset=['SAMPLE'])
+        all_sample_ages = data.variants[['SAMPLE', 'paternal_age']].drop_duplicates(subset=['SAMPLE'])
         all_sample_ages = all_sample_ages.dropna(subset=['paternal_age'])  # Must have valid paternal age
         logger.info(f"Warmup: Total samples for regression (across all types): {len(all_sample_ages)}")
         
@@ -537,6 +534,26 @@ class MemoryEfficientPipeline:
             n_variants = len(var_df)
             logger.info(f"  Extracting arrays for {n_variants} {var_type} variants ({len(all_sample_ages)} samples)...")
             arrays = extract_optimisation_arrays(var_df, filter_columns, all_sample_ages=all_sample_ages)
+            
+            # Debug: Log how many samples have variants vs 0 BEFORE any filtering
+            if arrays.n_variants > 0:
+                all_counts = count_per_sample_fast(arrays.sample_ids, np.ones(arrays.n_variants, dtype=bool), arrays.n_samples)
+            else:
+                all_counts = np.zeros(arrays.n_samples, dtype=int)
+            valid_idx = np.where(arrays.valid_age_mask)[0]
+            valid_counts_pre = all_counts[valid_idx]
+            n_with_var = np.sum(valid_counts_pre > 0)
+            n_zero = np.sum(valid_counts_pre == 0)
+            mean_count = np.mean(valid_counts_pre)
+            logger.info(f"  DEBUG {var_type} Stage3: {n_with_var}/{len(valid_counts_pre)} have >=1 variant, {n_zero} have 0, mean={mean_count:.2f}")
+            
+            # Debug: Log how many samples have variants vs 0
+            all_counts = count_per_sample_fast(arrays.sample_ids, np.ones(arrays.n_variants, dtype=bool), arrays.n_samples)
+            valid_idx = np.where(arrays.valid_age_mask)[0]
+            valid_counts = all_counts[valid_idx]
+            n_with_var = np.sum(valid_counts > 0)
+            n_zero = np.sum(valid_counts == 0)
+            logger.info(f"  DEBUG {var_type}: Before filtering - {n_with_var}/{len(valid_counts)} have >=1 variant, {n_zero} have 0")
             
             # Run optimization with parallel trials
             params, _, _, _ = self._optimize_with_arrays(
@@ -739,7 +756,7 @@ class MemoryEfficientPipeline:
         else:
             all_samples_df = data.variants
         
-        all_sample_ages = all_samples_df[['SAMPLE', 'paternal_age', 'maternal_age']].drop_duplicates(subset=['SAMPLE'])
+        all_sample_ages = all_samples_df[['SAMPLE', 'paternal_age']].drop_duplicates(subset=['SAMPLE'])
         all_sample_ages = all_sample_ages.dropna(subset=['paternal_age'])  # Must have valid paternal age
         logger.info(f"Total samples for regression (across all types): {len(all_sample_ages)}")
         
@@ -1037,12 +1054,19 @@ class MemoryEfficientPipeline:
         counts = count_per_sample_fast(arrays.sample_ids, mask, arrays.n_samples)
         valid_counts = counts[valid_sample_indices].astype(np.float64)
         
+        # Detailed logging for debugging mismatch with plots
+        n_with_variants = np.sum(valid_counts > 0)
+        n_zero = np.sum(valid_counts == 0)
+        n_total = len(valid_counts)
+        mean_count = np.mean(valid_counts)
+        logger.info(f"  OPTIMIZATION DATA: {n_with_variants}/{n_total} samples have >=1 variant, {n_zero} have 0, mean={mean_count:.2f}")
+        
         count_mean = np.mean(valid_counts)
         count_centered = valid_counts - count_mean
         achieved_slope = np.sum(pat_centered * count_centered) / pat_var_sum
         achieved_intercept = count_mean - achieved_slope * pat_mean
         
-        logger.info(f"  Achieved: intercept={achieved_intercept:.4f} (target={ref_intercept:.4f}), slope={achieved_slope:.4f} (target={ref_pat_slope:.4f})")
+        logger.info(f"  OPTIMIZATION REGRESSION: intercept={achieved_intercept:.4f} (target={ref_intercept:.4f}), slope={achieved_slope:.4f} (target={ref_pat_slope:.4f})")
         
         self._log_best_params(study, arrays)
         

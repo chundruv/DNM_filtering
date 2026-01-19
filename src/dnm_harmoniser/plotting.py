@@ -18,7 +18,8 @@ def plot_optimization_results(
     reference_df: pd.DataFrame,
     best_params: Dict[str, Dict[str, Any]],
     output_dir: Optional[Path] = None,
-    save_filtered: bool = True
+    save_filtered: bool = True, 
+    config: Optional[Any] = None
 ) -> None:
     """
     Plot DNMs vs. parental age separately for each parent and variant type.
@@ -77,7 +78,7 @@ def plot_optimization_results(
             continue
 
         # Apply filters to get filtered data
-        filtered_data = apply_filters_from_params(data_df, var_type, best_params_var)
+        filtered_data = apply_filters_from_params(data_df, var_type, best_params_var, config)
 
         # Save filtered variants
         if save_filtered and output_dir:
@@ -98,7 +99,7 @@ def plot_optimization_results(
 
             # Reference data (deCODE) - include ALL samples with valid ages,
             # even those with 0 variants for this type (to match target calculation)
-            all_ref_ages = reference_df[['SAMPLE', age_col]].drop_duplicates().set_index('SAMPLE')
+            all_ref_ages = reference_df[['SAMPLE', age_col]].drop_duplicates(subset=['SAMPLE']).set_index('SAMPLE')
             all_ref_ages = all_ref_ages.dropna(subset=[age_col])
             
             # Count reference variants per sample (only samples with variants will appear)
@@ -114,7 +115,8 @@ def plot_optimization_results(
             # Filtered input data - include ALL samples with valid ages,
             # even those with 0 variants for this type after filtering (to match optimization)
             # Get all unique samples from the FULL input data (across all variant types)
-            all_sample_ages = data_df[['SAMPLE', age_col]].drop_duplicates().set_index('SAMPLE')
+            # Use subset=['SAMPLE'] to ensure one row per sample (matching optimization)
+            all_sample_ages = data_df[['SAMPLE', age_col]].drop_duplicates(subset=['SAMPLE']).set_index('SAMPLE')
             all_sample_ages = all_sample_ages.dropna(subset=[age_col])
             
             # Count filtered variants per sample (only samples with variants will appear)
@@ -123,6 +125,21 @@ def plot_optimization_results(
             # Join: start with ALL samples (to include those with 0 variants for this type)
             plot_data_filt = all_sample_ages.join(filt_counts, how='left')
             plot_data_filt['dnm_count'] = plot_data_filt['dnm_count'].fillna(0)
+            
+            # Log sample counts for debugging
+            n_with_variants = (plot_data_filt['dnm_count'] > 0).sum()
+            n_total = len(plot_data_filt)
+            n_zero = (plot_data_filt['dnm_count'] == 0).sum()
+            mean_count = plot_data_filt['dnm_count'].mean()
+            logger.info(f"  {var_type} {age_label}: {n_with_variants}/{n_total} samples have >=1 variant, {n_zero} have 0, mean={mean_count:.2f}")
+            
+            # Log the regression results for comparison with optimization
+            if len(plot_data_filt) > 0:
+                try:
+                    debug_model = smf.ols(f'dnm_count ~ {age_col}', data=plot_data_filt).fit()
+                    logger.info(f"  {var_type} {age_label} PLOT REGRESSION: intercept={debug_model.params['Intercept']:.4f}, slope={debug_model.params[age_col]:.4f}")
+                except Exception as e:
+                    logger.warning(f"  Failed to fit debug model: {e}")
 
             # Plot scatter points only (no automatic regression lines)
             if len(plot_data_ref) > 0:
@@ -215,40 +232,53 @@ def plot_optimization_results(
 def apply_filters_from_params(
     df: pd.DataFrame,
     var_type: str,
-    params: Dict[str, Any]
+    params: Dict[str, Any],
+    config: Optional[Any] = None  # <--- NEW ARGUMENT
 ) -> pd.DataFrame:
     """
-    Apply filtering parameters to dataframe.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input dataframe
-    var_type : str
-        Variant type to filter
-    params : dict
-        Filtering parameters (e.g., {'max_MQ': 40, 'min_child_coverage': 10})
-
-    Returns
-    -------
-    pd.DataFrame
-        Filtered dataframe
+    Apply filtering parameters to dataframe, handling linked columns.
     """
     # Start with variant type filter
     filtered = df[df['var_type'] == var_type].copy()
 
+    # Build a lookup for linked columns if config is provided
+    linked_columns = {}
+    if config and hasattr(config, 'optimisation'):
+        for col_conf in config.optimisation.columns:
+            if col_conf.linked_to:
+                linked_columns[col_conf.name] = col_conf.linked_to
+
     # Apply each parameter
     for param, value in params.items():
+        prefix = None
+        col = None
+        
+        # Parse the parameter name
         if param.startswith('min_'):
-            col = param[4:]  # Remove 'min_' prefix
-            if col in filtered.columns:
-                filtered = filtered[filtered[col] >= value]
-
+            prefix = 'min'
+            col = param[4:]
         elif param.startswith('max_'):
-            col = param[4:]  # Remove 'max_' prefix
+            prefix = 'max'
+            col = param[4:]
+            
+        if col:
+            # 1. Apply to the primary column
             if col in filtered.columns:
-                filtered = filtered[filtered[col] <= value]
-
+                if prefix == 'min':
+                    filtered = filtered[filtered[col] >= value]
+                elif prefix == 'max':
+                    filtered = filtered[filtered[col] <= value]
+            
+            # 2. Apply to the linked column (if any)
+            if col in linked_columns:
+                linked_col = linked_columns[col]
+                # Only apply if the linked column actually exists in the data
+                if linked_col in filtered.columns:
+                    if prefix == 'min':
+                        filtered = filtered[filtered[linked_col] >= value]
+                    elif prefix == 'max':
+                        filtered = filtered[filtered[linked_col] <= value]
+    
     return filtered
 
 
