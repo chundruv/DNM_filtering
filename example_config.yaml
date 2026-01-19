@@ -145,6 +145,40 @@ optimisation:
   # Typical: [0.1, 1.0] gives priority to slope while still considering intercept
   regression_weights: [0.1, 1.0]
 
+  # Optional: Variant-type specific regression weights (overrides regression_weights for specified types)
+  # regression_weights_by_type:
+  #   Insertion: [0.05, 1.0]
+  #   Deletion: [0.05, 1.0]
+
+  # Loss function for optimization
+  # Options:
+  #   - weighted_mse: Weighted mean squared error (default, balanced approach)
+  #   - absolute: Mean absolute error (robust to outliers)
+  #   - huber: Huber loss (quadratic for small errors, linear for large errors)
+  #   - log_ratio: Log-ratio loss (penalizes proportional errors)
+  #   - slope_priority: Prioritizes slope matching with tolerance on intercept
+  #   - asymmetric: Higher penalty for undershooting the slope target
+  #   - max_slope: Maximum slope optimization with intercept tolerance
+  loss_function: weighted_mse
+
+  # Optional: Variant-type specific loss functions (overrides loss_function for specified types)
+  # loss_function_by_type:
+  #   SNV: max_slope
+  #   Insertion: weighted_mse
+  #   Deletion: weighted_mse
+
+  # Huber loss delta parameter (only used when loss_function=huber)
+  # Errors below delta use quadratic loss, above use linear loss
+  huber_delta: 0.1
+
+  # Asymmetric loss penalty multiplier (only used when loss_function=asymmetric)
+  # Higher values increase penalty for undershooting the slope target
+  asymmetric_penalty: 3.0
+
+  # Intercept tolerance (only used with slope_priority or max_slope loss functions)
+  # Allowed intercept deviation as a fraction before penalty kicks in
+  intercept_tolerance: 0.5
+
 # Performance settings
 max_workers: 4
 use_cache: true

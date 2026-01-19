@@ -5,38 +5,37 @@ stage1:
 stage2:
   enabled: true
   min_dnm_count: 5
-  max_dnm_count: 300
+  max_dnm_count: 200
 
 stage3:
   enabled: true
   n_trials: 2000
-  sampler: tpe
+  sampler: tpe  # Options: tpe, cmaes, random
   pruner: null  # Options: successive_halving, hyperband, median, null
-  multivariate: false
+  multivariate: true
 
 optimisation:
   variant_types:
     - SNV
     - Insertion
     - Deletion
-    
-  # FIXED: Column names for input data (UKB) - must match exactly
+  # Required metadata column names in input data
   sample_id_column_data: SAMPLE
   paternal_age_column_data: paternal_age
   maternal_age_column_data: maternal_age
   reference_column_data: REF
   alternate_column_data: ALT
 
-  # FIXED: Column names for reference data (deCODE parages)
+  # Required metadata column names in reference data
   sample_id_column_reference: pid
   paternal_age_column_reference: paternal_age
   maternal_age_column_reference: maternal_age
   reference_column_reference: Ref
   alternate_column_reference: Alt
 
-  # Column configurations - FIXED column names to match data
+  # Column configurations with types and optimisation criteria
   columns:
-    - name: DeNovoCNN_prob  # FIXED: was "DeNovoCNN probability"
+    - name: DeNovoCNN_prob
       dtype: float
       optimisation: maximum  # Keep HIGH probability (confident calls)
 
@@ -52,32 +51,20 @@ optimisation:
       dtype: int
       optimisation: minimum
 
-    # FIXED: column names to match data (lowercase with underscores)
-    - name: child_coverage  # FIXED: was "Child coverage"
+    # Maximize coverage (higher is better)
+    - name: child_coverage
       dtype: int
       optimisation: maximum
 
-    - name: father_coverage  # FIXED: was "Father coverage"
+    - name: father_coverage
       dtype: int
       optimisation: maximum
       linked_to: mother_coverage
 
-    - name: mother_coverage  # FIXED: was "Mother coverage"
+    - name: mother_coverage
       dtype: int
       optimisation: maximum
       linked_to: father_coverage
-
-    # abs_length is computed from REF/ALT in data.py, so use that column name
-    - name: abs_length
-      dtype: int
-      optimisation: range
-      range_constraint:
-        min: 1
-        max: 20
-      variant_types:
-        - Insertion
-        - Deletion
-      computed: true
 
     # Keep allele balance within a symmetric range
     - name: VAF
@@ -87,7 +74,7 @@ optimisation:
         lower: 15
         scale: 100
 
-    # IMF with regular (non-symmetric) range - only for indels
+    # IMF with regular (non-symmetric) range
     - name: IMF
       dtype: float
       optimisation: range
@@ -99,22 +86,15 @@ optimisation:
         - Deletion
 
   regression_formula: "dnm_count ~ paternal_age"
-  
-  # Fixed weights - UNCOMMENTED and set to prioritize intercept
-  regression_weights: [10.0, 1.0]  # [intercept_weight, slope_weight] - 10x weight on intercept
-  regression_weights_by_type:
-    Insertion: [10.0, 1.0]
-    Deletion: [10.0, 1.0]
-  
-  # DISABLED - let fixed weights work
-  optimise_intercept_weight: false
-  intercept_weight_range: [0.001, 1.0]  # ignored when optimise_intercept_weight: false
+  regression_weights: [1.0, 5.0]
+  loss_function: weighted_mse
 
 # Performance settings
-max_workers: 4
+max_workers: 32
 use_cache: true
 cache_dir: null  # null means use default
 
 # Reproducibility
 seed: 49
 deterministic: true
+

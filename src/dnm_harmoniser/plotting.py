@@ -233,7 +233,7 @@ def apply_filters_from_params(
     df: pd.DataFrame,
     var_type: str,
     params: Dict[str, Any],
-    config: Optional[Any] = None  # <--- NEW ARGUMENT
+    config: Optional[Any] = None
 ) -> pd.DataFrame:
     """
     Apply filtering parameters to dataframe, handling linked columns.
@@ -241,12 +241,16 @@ def apply_filters_from_params(
     # Start with variant type filter
     filtered = df[df['var_type'] == var_type].copy()
 
-    # Build a lookup for linked columns if config is provided
+    # Build lookups for linked columns and variant_types restrictions
     linked_columns = {}
+    column_variant_types = {}  # NEW: track which columns apply to which variant types
+    
     if config and hasattr(config, 'optimisation'):
         for col_conf in config.optimisation.columns:
             if col_conf.linked_to:
                 linked_columns[col_conf.name] = col_conf.linked_to
+            if col_conf.variant_types:  # NEW: store variant type restrictions
+                column_variant_types[col_conf.name] = col_conf.variant_types
 
     # Apply each parameter
     for param, value in params.items():
@@ -262,6 +266,11 @@ def apply_filters_from_params(
             col = param[4:]
             
         if col:
+            # NEW: Skip if this column doesn't apply to this variant type
+            if col in column_variant_types:
+                if var_type not in column_variant_types[col]:
+                    continue  # Skip this filter for this variant type
+            
             # 1. Apply to the primary column
             if col in filtered.columns:
                 if prefix == 'min':
@@ -272,7 +281,6 @@ def apply_filters_from_params(
             # 2. Apply to the linked column (if any)
             if col in linked_columns:
                 linked_col = linked_columns[col]
-                # Only apply if the linked column actually exists in the data
                 if linked_col in filtered.columns:
                     if prefix == 'min':
                         filtered = filtered[filtered[linked_col] >= value]
