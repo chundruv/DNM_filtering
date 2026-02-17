@@ -27,6 +27,7 @@ from .plotting import (
     plot_regression_trajectory,
     plot_optimization_summary,
 )
+from .vaf_quality import compute_vaf_penalty
 
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,9 @@ class OptimisationArrays:
     # Filter columns as numpy arrays (column_name -> array)
     filter_arrays: Dict[str, np.ndarray]
     
+    # VAF values per variant (for VAF quality penalty in objective)
+    vaf_values: Optional[np.ndarray]  # shape (n_variants,), None if not available
+    
     # Parental ages per sample (indexed by sample_idx)
     paternal_ages: np.ndarray  # shape (n_samples,)
     valid_age_mask: np.ndarray  # bool array for samples with valid ages
@@ -90,7 +94,8 @@ def extract_optimisation_arrays(
     df: pd.DataFrame,
     filter_columns: List[str],
     sample_col: str = 'SAMPLE',
-    all_sample_ages: Optional[pd.DataFrame] = None
+    all_sample_ages: Optional[pd.DataFrame] = None,
+    vaf_col: Optional[str] = None,
 ) -> OptimisationArrays:
     """Extract numpy arrays from DataFrame for memory-efficient optimization.
     
@@ -101,9 +106,10 @@ def extract_optimisation_arrays(
         df: DataFrame containing variants (may be empty if no variants of this type)
         filter_columns: List of column names to extract for filtering
         sample_col: Name of sample ID column
-        all_sample_ages: Optional DataFrame with columns [SAMPLE, paternal_age, maternal_age]
+        all_sample_ages: Optional DataFrame with columns [SAMPLE, paternal_age]
                         containing ALL samples to include in regression (even those with
                         0 variants of this type). If None, samples are derived from df.
+        vaf_col: Optional column name for VAF values (for VAF quality penalty)
     """
     # Create sample ID mapping - use all_sample_ages if provided, otherwise derive from df
     if all_sample_ages is not None:
@@ -159,12 +165,23 @@ def extract_optimisation_arrays(
     # n_variants is the number of variants we're actually using (after filtering to known samples)
     n_variants = len(sample_ids)
     
+    # Extract VAF values if column is specified and exists
+    vaf_values = None
+    if vaf_col and vaf_col in df.columns and len(df) > 0:
+        vaf_data = pd.to_numeric(df[vaf_col], errors='coerce').values.astype(np.float32)
+        if len(valid_variant_mask) > 0:
+            vaf_values = vaf_data[valid_variant_mask]
+        else:
+            vaf_values = vaf_data
+        logger.debug(f"Extracted {len(vaf_values)} VAF values from column '{vaf_col}'")
+    
     return OptimisationArrays(
         sample_ids=sample_ids,
         sample_id_to_idx=sample_id_to_idx,
         idx_to_sample_id=idx_to_sample_id,
         n_samples=n_samples,
         filter_arrays=filter_arrays,
+        vaf_values=vaf_values,
         paternal_ages=paternal_ages,
         valid_age_mask=valid_age_mask,
         n_variants=n_variants
@@ -533,7 +550,9 @@ class MemoryEfficientPipeline:
             # Extract numpy arrays - pass all_sample_ages to include samples with 0 variants
             n_variants = len(var_df)
             logger.info(f"  Extracting arrays for {n_variants} {var_type} variants ({len(all_sample_ages)} samples)...")
-            arrays = extract_optimisation_arrays(var_df, filter_columns, all_sample_ages=all_sample_ages)
+            # Pass vaf_col if VAF quality metric is configured
+            vaf_col = self.config.optimisation.vaf_column if self.config.optimisation.vaf_quality_metric else None
+            arrays = extract_optimisation_arrays(var_df, filter_columns, all_sample_ages=all_sample_ages, vaf_col=vaf_col)
             
             # Debug: Log how many samples have variants vs 0 BEFORE any filtering
             if arrays.n_variants > 0:
@@ -783,7 +802,9 @@ class MemoryEfficientPipeline:
             # Extract numpy arrays - pass all_sample_ages to include samples with 0 variants
             n_variants = len(var_df)
             logger.info(f"  Extracting arrays for {n_variants} {var_type} variants ({len(all_sample_ages)} samples)...")
-            arrays = extract_optimisation_arrays(var_df, filter_columns, all_sample_ages=all_sample_ages)
+            # Pass vaf_col if VAF quality metric is configured
+            vaf_col = self.config.optimisation.vaf_column if self.config.optimisation.vaf_quality_metric else None
+            arrays = extract_optimisation_arrays(var_df, filter_columns, all_sample_ages=all_sample_ages, vaf_col=vaf_col)
             
             # Run optimization with parallel trials
             params, best_score, study, trial_hist = self._optimize_with_arrays(
@@ -867,6 +888,19 @@ class MemoryEfficientPipeline:
         elif loss_fn in ("slope_priority", "max_slope"):
             logger.info(f"      Intercept tolerance: {intercept_tolerance:.1%}")
         logger.info(f"  ====================")
+        
+        # VAF quality penalty configuration
+        vaf_metric = self.config.optimisation.vaf_quality_metric
+        vaf_weight = self.config.optimisation.get_vaf_quality_weight(var_type)
+        vaf_min = self.config.optimisation.vaf_min
+        vaf_max = self.config.optimisation.vaf_max
+        has_vaf_penalty = (vaf_metric is not None and vaf_weight > 0 
+                          and arrays.vaf_values is not None)
+        if has_vaf_penalty:
+            logger.info(f"  VAF quality penalty: metric={vaf_metric}, weight={vaf_weight:.3f}")
+        else:
+            if vaf_metric is not None and arrays.vaf_values is None:
+                logger.warning(f"  VAF quality metric '{vaf_metric}' configured but no VAF values available")
 
         # 3. Pre-extract paternal ages for valid samples
         valid_pat_ages = arrays.paternal_ages[valid_sample_indices]
@@ -1001,7 +1035,18 @@ class MemoryEfficientPipeline:
                 intercept_error = intercept_rel_error ** 2
                 loss = intercept_weight * intercept_error + slope_weight * slope_error
             
-            # G. Track trial history for plotting
+            # G. VAF quality penalty (if configured)
+            vaf_penalty = 0.0
+            if has_vaf_penalty:
+                filtered_vaf = arrays.vaf_values[mask]
+                if len(filtered_vaf) >= 10:
+                    vaf_penalty = compute_vaf_penalty(
+                        filtered_vaf, var_type, metric=vaf_metric,
+                        vaf_min=vaf_min, vaf_max=vaf_max
+                    )
+                    loss = loss + vaf_weight * vaf_penalty
+            
+            # H. Track trial history for plotting
             trial_history.append({
                 'trial_number': trial.number,
                 'slope': slope,
@@ -1009,6 +1054,7 @@ class MemoryEfficientPipeline:
                 'loss': loss,
                 'slope_error': slope_error,
                 'intercept_error': intercept_error,
+                'vaf_penalty': vaf_penalty,
             })
             
             return loss
@@ -1067,6 +1113,17 @@ class MemoryEfficientPipeline:
         achieved_intercept = count_mean - achieved_slope * pat_mean
         
         logger.info(f"  OPTIMIZATION REGRESSION: intercept={achieved_intercept:.4f} (target={ref_intercept:.4f}), slope={achieved_slope:.4f} (target={ref_pat_slope:.4f})")
+        
+        # Log VAF quality penalty for best params
+        if has_vaf_penalty:
+            filtered_vaf = arrays.vaf_values[mask]
+            if len(filtered_vaf) >= 10:
+                best_vaf_penalty = compute_vaf_penalty(
+                    filtered_vaf, var_type, metric=vaf_metric,
+                    vaf_min=vaf_min, vaf_max=vaf_max
+                )
+                logger.info(f"  VAF QUALITY: metric={vaf_metric}, penalty={best_vaf_penalty:.4f}, "
+                           f"weighted_contribution={vaf_weight * best_vaf_penalty:.4f}")
         
         self._log_best_params(study, arrays)
         

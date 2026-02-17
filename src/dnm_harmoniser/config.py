@@ -289,6 +289,43 @@ class OptimisationConfig(BaseModel):
         "weighted_mse",
         description="Loss function for optimization. Options: weighted_mse (default), absolute, huber, log_ratio, slope_priority, asymmetric, max_slope"
     )
+    
+    # VAF quality penalty
+    vaf_quality_metric: Optional[Literal[
+        "mean", "proportion", "skewness", "kl_divergence"
+    ]] = Field(
+        None,
+        description="VAF distribution quality metric to add as a penalty term in the loss function. "
+                    "None = disabled. Options: mean (penalises deviation from expected mean), "
+                    "proportion (penalises excess low-VAF variants), "
+                    "skewness (penalises distributional asymmetry), "
+                    "kl_divergence (penalises full shape deviation from truncated normal). "
+                    "All are variant-type-aware and account for natural indel alignment bias."
+    )
+    vaf_quality_weight: float = Field(
+        0.1,
+        ge=0.0,
+        description="Weight for VAF quality penalty in the loss function. "
+                    "0.0 = disabled, 0.1 = mild regularisation (recommended start), "
+                    "1.0 = equal weight to regression loss. Only used when vaf_quality_metric is set."
+    )
+    vaf_quality_weight_by_type: Optional[Dict[str, float]] = Field(
+        None,
+        description="Optional variant-type specific VAF quality weights. "
+                    "Example: {'Insertion': 0.2, 'Deletion': 0.15} to penalise indels more."
+    )
+    vaf_column: str = Field(
+        "proband_VAF",
+        description="Column name containing proband VAF values in the input data."
+    )
+    vaf_min: float = Field(
+        0.25,
+        description="Lower VAF bound (for KL divergence reference distribution)."
+    )
+    vaf_max: float = Field(
+        0.75,
+        description="Upper VAF bound (for KL divergence reference distribution)."
+    )
     loss_function_by_type: Optional[Dict[str, str]] = Field(
         None,
         description="Optional variant-type specific loss functions. Example: {'SNV': 'max_slope', 'Insertion': 'weighted_mse'}"
@@ -323,6 +360,18 @@ class OptimisationConfig(BaseModel):
         if self.loss_function_by_type and variant_type in self.loss_function_by_type:
             return self.loss_function_by_type[variant_type]
         return self.loss_function
+    
+    def get_vaf_quality_weight(self, variant_type: str) -> float:
+        """Get VAF quality weight for a specific variant type.
+        
+        Returns variant-specific weight if defined, otherwise falls back to default.
+        Returns 0.0 if vaf_quality_metric is not set.
+        """
+        if self.vaf_quality_metric is None:
+            return 0.0
+        if self.vaf_quality_weight_by_type and variant_type in self.vaf_quality_weight_by_type:
+            return self.vaf_quality_weight_by_type[variant_type]
+        return self.vaf_quality_weight
 
     @model_validator(mode='after')
     def validate_linked_columns(self):

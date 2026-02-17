@@ -50,8 +50,8 @@ def plot_optimization_results(
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create 2x3 subplot grid
-    fig, axes = plt.subplots(2, 3, figsize=(24, 14))
+    # Create 3x3 subplot grid (paternal age, maternal age, VAF distributions)
+    fig, axes = plt.subplots(3, 3, figsize=(24, 20))
     fig.suptitle('De Novo Mutations vs. Parental Age by Variant Type',
                  fontsize=20, fontweight='bold', y=0.995)
 
@@ -185,6 +185,49 @@ def plot_optimization_results(
             ax.set_ylabel('Number of DNMs per Person' if col_idx == 0 else '', fontsize=14)
             ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.3)
             ax.legend(loc='upper left', fontsize=11)
+
+    # Row 3: VAF distributions
+    vaf_col = None
+    if config and hasattr(config, 'optimisation'):
+        vaf_col = getattr(config.optimisation, 'vaf_column', 'proband_VAF')
+    if vaf_col is None:
+        vaf_col = 'proband_VAF'
+    
+    for col_idx, var_type in enumerate(var_types):
+        ax = axes[2, col_idx]
+        best_params_var = best_params.get(var_type)
+        
+        # Reference VAF distribution
+        ref_subset = reference_df[reference_df['var_type'] == var_type]
+        if vaf_col in ref_subset.columns and len(ref_subset) > 0:
+            ref_vaf = ref_subset[vaf_col].dropna()
+            if len(ref_vaf) > 0:
+                ax.hist(ref_vaf, bins=50, range=(0.2, 0.8), alpha=0.5,
+                       color='royalblue', density=True, label='Reference')
+        
+        # Filtered data VAF distribution
+        if best_params_var:
+            filtered_data = apply_filters_from_params(data_df, var_type, best_params_var, config)
+            if vaf_col in filtered_data.columns and len(filtered_data) > 0:
+                filt_vaf = filtered_data[vaf_col].dropna()
+                if len(filt_vaf) > 0:
+                    ax.hist(filt_vaf, bins=50, range=(0.2, 0.8), alpha=0.5,
+                           color='darkorange', density=True, label='Filtered')
+        
+        # Unfiltered data VAF (light outline for comparison)
+        unfiltered = data_df[data_df['var_type'] == var_type]
+        if vaf_col in unfiltered.columns and len(unfiltered) > 0:
+            unfilt_vaf = unfiltered[vaf_col].dropna()
+            if len(unfilt_vaf) > 0:
+                ax.hist(unfilt_vaf, bins=50, range=(0.2, 0.8), alpha=0.3,
+                       color='gray', density=True, histtype='step',
+                       linewidth=1.5, label='Unfiltered')
+        
+        ax.set_title(f'{var_type}s', fontsize=16, fontweight='bold')
+        ax.set_xlabel('Proband VAF', fontsize=14)
+        ax.set_ylabel('Density' if col_idx == 0 else '', fontsize=14)
+        ax.legend(loc='upper left', fontsize=11)
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.3)
 
     plt.tight_layout()
 
