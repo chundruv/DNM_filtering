@@ -189,9 +189,9 @@ def plot_optimization_results(
     # Row 3: VAF distributions
     vaf_col = None
     if config and hasattr(config, 'optimisation'):
-        vaf_col = getattr(config.optimisation, 'vaf_column', 'proband_VAF')
+        vaf_col = getattr(config.optimisation, 'vaf_column', 'VAF')
     if vaf_col is None:
-        vaf_col = 'proband_VAF'
+        vaf_col = 'VAF'
     
     for col_idx, var_type in enumerate(var_types):
         ax = axes[2, col_idx]
