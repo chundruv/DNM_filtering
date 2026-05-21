@@ -75,7 +75,8 @@ def optimize_filters(
         paternal_age_col=config.optimisation.paternal_age_column_data,
         maternal_age_col=config.optimisation.maternal_age_column_data,
         reference_col=config.optimisation.reference_column_data,
-        alternate_col=config.optimisation.alternate_column_data
+        alternate_col=config.optimisation.alternate_column_data,
+        columns=config.optimisation.get_input_columns('data'),
     )
 
     logger.info(f"Loading reference from {reference_path}")
@@ -85,7 +86,8 @@ def optimize_filters(
         paternal_age_col=config.optimisation.paternal_age_column_reference,
         maternal_age_col=config.optimisation.maternal_age_column_reference,
         reference_col=config.optimisation.reference_column_reference,
-        alternate_col=config.optimisation.alternate_column_reference
+        alternate_col=config.optimisation.alternate_column_reference,
+        columns=config.optimisation.get_input_columns('reference'),
     )
     
     # Run optimisation (use memory-efficient pipeline if requested)
@@ -208,7 +210,8 @@ def run_optimisation(
             paternal_age_col=config.optimisation.paternal_age_column_data,
             maternal_age_col=config.optimisation.maternal_age_column_data,
             reference_col=config.optimisation.reference_column_data,
-            alternate_col=config.optimisation.alternate_column_data
+            alternate_col=config.optimisation.alternate_column_data,
+            columns=config.optimisation.get_input_columns('data'),
         )
 
     if isinstance(reference, (str, Path)):
@@ -218,7 +221,8 @@ def run_optimisation(
             paternal_age_col=config.optimisation.paternal_age_column_reference,
             maternal_age_col=config.optimisation.maternal_age_column_reference,
             reference_col=config.optimisation.reference_column_reference,
-            alternate_col=config.optimisation.alternate_column_reference
+            alternate_col=config.optimisation.alternate_column_reference,
+            columns=config.optimisation.get_input_columns('reference'),
         )
 
     # Run pipeline with automatic plotting (use memory-efficient pipeline if requested)
@@ -364,7 +368,8 @@ def calculate_regression_targets(
             paternal_age_col=config.optimisation.paternal_age_column_reference,
             maternal_age_col=config.optimisation.maternal_age_column_reference,
             reference_col=config.optimisation.reference_column_reference,
-            alternate_col=config.optimisation.alternate_column_reference
+            alternate_col=config.optimisation.alternate_column_reference,
+            columns=config.optimisation.get_input_columns('reference'),
         )
     config.optimisation.variant_types = variant_types
     config.optimisation.regression_formula = formula

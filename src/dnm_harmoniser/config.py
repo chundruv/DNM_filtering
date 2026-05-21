@@ -450,6 +450,47 @@ class OptimisationConfig(BaseModel):
         """Get all columns that will be optimised (excluding metadata)."""
         return [col for col in self.columns if col.optimisation != "none"]
 
+    def get_input_columns(self, side: Literal["data", "reference"] = "data") -> List[str]:
+        """Return the raw input column names needed from the source file.
+
+        Used by loaders to project only required columns at read time, which can
+        cut peak memory by an order of magnitude on large inputs.
+
+        Includes:
+            - sample / paternal_age / maternal_age / REF / ALT (raw names per side)
+            - every column in self.columns that isn't `computed`
+            - vaf_column when a VAF quality metric is configured
+        """
+        if side == "data":
+            metadata = [
+                self.sample_id_column_data,
+                self.paternal_age_column_data,
+                self.maternal_age_column_data,
+                self.reference_column_data,
+                self.alternate_column_data,
+            ]
+        else:
+            metadata = [
+                self.sample_id_column_reference,
+                self.paternal_age_column_reference,
+                self.maternal_age_column_reference,
+                self.reference_column_reference,
+                self.alternate_column_reference,
+            ]
+
+        filter_cols = [col.name for col in self.columns if not col.computed]
+
+        if self.vaf_quality_metric is not None:
+            filter_cols.append(self.vaf_column)
+
+        seen = set()
+        ordered: List[str] = []
+        for name in metadata + filter_cols:
+            if name and name not in seen:
+                seen.add(name)
+                ordered.append(name)
+        return ordered
+
     def get_columns_for_variant_type(self, variant_type: Literal["SNV", "Insertion", "Deletion"]) -> List[ColumnConfig]:
         """Get all columns that apply to a specific variant type.
 

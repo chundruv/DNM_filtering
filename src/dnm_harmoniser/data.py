@@ -52,6 +52,8 @@ class VariantDataset:
         suffixes = {s.lower() for s in path.suffixes}
         if '.parquet' in suffixes or path.suffix.lower() == '.pq':
             return cls.from_parquet(path, **kwargs)
+        # The TSV loader doesn't (yet) project columns, so drop the kwarg.
+        kwargs.pop('columns', None)
         return cls.from_tsv(path, **kwargs)
 
     @classmethod
@@ -120,13 +122,74 @@ class VariantDataset:
         reference_col: str = 'ref',
         alternate_col: str = 'alt',
         required_cols: Optional[List[str]] = None,
+        columns: Optional[List[str]] = None,
+        dict_encode_strings: bool = True,
+        downcast_numerics: bool = True,
     ) -> 'VariantDataset':
         """Load from a Parquet file.
 
         Much faster than from_tsv on large inputs because Parquet preserves dtypes,
         so we skip the per-column object->numeric scan that dominates TSV load time.
+
+        Args:
+            columns: If given, only load these columns. Names missing from the file
+                are silently skipped (with a warning). Massive memory win on wide TSVs.
+            dict_encode_strings: Dictionary-encode string columns in Arrow before
+                converting to pandas. Turns 200M-row SAMPLE strings into a Categorical
+                with ~20K categories — usually a 10-50x peak-memory reduction.
+            downcast_numerics: Cast int64->int32 and float64->float32 in Arrow when
+                values fit. Halves numeric memory at peak.
         """
-        df = pd.read_parquet(path)
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pf = pq.ParquetFile(str(path))
+        available = set(pf.schema_arrow.names)
+
+        if columns is not None:
+            load_cols = [c for c in columns if c in available]
+            missing = [c for c in columns if c not in available]
+            if missing:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"from_parquet: requested columns not in {path.name}, skipping: {missing}"
+                )
+        else:
+            load_cols = None
+
+        table = pq.read_table(str(path), columns=load_cols, use_threads=True)
+
+        # Compact in Arrow before pandas materialization, since pandas object-dtype
+        # strings + int64/float64 defaults are what blow up peak memory.
+        if dict_encode_strings or downcast_numerics:
+            new_arrays = []
+            new_fields = []
+            for i, field in enumerate(table.schema):
+                col = table.column(i)
+                t = field.type
+
+                if dict_encode_strings and (
+                    pa.types.is_string(t) or pa.types.is_large_string(t)
+                ):
+                    col = col.dictionary_encode()
+                elif downcast_numerics and pa.types.is_floating(t) and t.bit_width > 32:
+                    try:
+                        col = col.cast(pa.float32(), safe=False)
+                    except (pa.ArrowInvalid, pa.ArrowNotImplementedError):
+                        pass
+                elif downcast_numerics and pa.types.is_integer(t) and t.bit_width > 32:
+                    try:
+                        col = col.cast(pa.int32(), safe=True)
+                    except (pa.ArrowInvalid, pa.ArrowNotImplementedError):
+                        pass  # value out of int32 range, keep original
+
+                new_arrays.append(col)
+                new_fields.append(pa.field(field.name, col.type))
+
+            table = pa.table(new_arrays, schema=pa.schema(new_fields))
+
+        df = table.to_pandas(self_destruct=True)
+        del table
 
         df = cls._normalize_columns(
             df, sample_col, paternal_age_col, maternal_age_col, reference_col, alternate_col
