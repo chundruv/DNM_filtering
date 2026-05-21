@@ -69,7 +69,7 @@ def optimize_filters(
     
     # Load data
     logger.info(f"Loading data from {data_path}")
-    data = VariantDataset.from_tsv(
+    data = VariantDataset.from_path(
         Path(data_path),
         sample_col=config.optimisation.sample_id_column_data,
         paternal_age_col=config.optimisation.paternal_age_column_data,
@@ -79,7 +79,7 @@ def optimize_filters(
     )
 
     logger.info(f"Loading reference from {reference_path}")
-    reference = VariantDataset.from_tsv(
+    reference = VariantDataset.from_path(
         Path(reference_path),
         sample_col=config.optimisation.sample_id_column_reference,
         paternal_age_col=config.optimisation.paternal_age_column_reference,
@@ -202,7 +202,7 @@ def run_optimisation(
 
     # Load data if needed
     if isinstance(data, (str, Path)):
-        data = VariantDataset.from_tsv(
+        data = VariantDataset.from_path(
             Path(data),
             sample_col=config.optimisation.sample_id_column_data,
             paternal_age_col=config.optimisation.paternal_age_column_data,
@@ -212,7 +212,7 @@ def run_optimisation(
         )
 
     if isinstance(reference, (str, Path)):
-        reference = VariantDataset.from_tsv(
+        reference = VariantDataset.from_path(
             Path(reference),
             sample_col=config.optimisation.sample_id_column_reference,
             paternal_age_col=config.optimisation.paternal_age_column_reference,
@@ -358,7 +358,7 @@ def calculate_regression_targets(
     config = PipelineConfig()
 
     if isinstance(reference, (str, Path)):
-        reference = VariantDataset.from_tsv(
+        reference = VariantDataset.from_path(
             Path(reference),
             sample_col=config.optimisation.sample_id_column_reference,
             paternal_age_col=config.optimisation.paternal_age_column_reference,

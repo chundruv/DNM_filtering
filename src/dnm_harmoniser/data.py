@@ -42,6 +42,19 @@ class VariantDataset:
             self.variants[col] = pd.to_numeric(self.variants[col], downcast='float')
     
     @classmethod
+    def from_path(
+        cls,
+        path: Path,
+        **kwargs,
+    ) -> 'VariantDataset':
+        """Load from a file, dispatching on extension (.parquet vs TSV)."""
+        path = Path(path)
+        suffixes = {s.lower() for s in path.suffixes}
+        if '.parquet' in suffixes or path.suffix.lower() == '.pq':
+            return cls.from_parquet(path, **kwargs)
+        return cls.from_tsv(path, **kwargs)
+
+    @classmethod
     def from_tsv(
         cls,
         path: Path,
@@ -61,48 +74,10 @@ class VariantDataset:
             if df[col].astype(str).str.contains('"').any():
                 df[col] = df[col].str.replace('"', '', regex=False)
 
-        # Standardize column names
-        if sample_col != 'SAMPLE' and sample_col in df.columns:
-            df.rename(columns={sample_col: 'SAMPLE'}, inplace=True)
-
-        if paternal_age_col != 'paternal_age' and paternal_age_col in df.columns:
-            df.rename(columns={paternal_age_col: 'paternal_age'}, inplace=True)
-
-        if maternal_age_col != 'maternal_age' and maternal_age_col in df.columns:
-            df.rename(columns={maternal_age_col: 'maternal_age'}, inplace=True)
-
-        # Standardize reference and alternate column names
-        if reference_col != 'REF' and reference_col in df.columns:
-            df.rename(columns={reference_col: 'REF'}, inplace=True)
-        elif reference_col.lower() != 'ref':
-            # Handle common variations if not already standardized
-            for old in ['Ref', 'Reference', 'ref', 'reference']:
-                if old in df.columns and old != reference_col:
-                    df.rename(columns={old: 'REF'}, inplace=True)
-                    break
-
-        if alternate_col != 'ALT' and alternate_col in df.columns:
-            df.rename(columns={alternate_col: 'ALT'}, inplace=True)
-        elif alternate_col.lower() != 'alt':
-            # Handle common variations if not already standardized
-            for old in ['Alt', 'Alternate', 'alt', 'alternate', 'Variant']:
-                if old in df.columns and old != alternate_col:
-                    df.rename(columns={old: 'ALT'}, inplace=True)
-                    break
-        
-        # Calculate variant type and derived metrics
-        if 'REF' in df.columns and 'ALT' in df.columns:
-            df['var_type'] = cls._get_var_type(df)
-            df['length'] = df['ALT'].str.len() - df['REF'].str.len()
-            df['abs_length'] = np.abs(df['length'])  # Absolute indel length for filtering
-            # Homopolymer calculation is slow - only enable if column is in config
-            # df['homopolymer_length'] = df.apply(lambda row: cls._get_homopolymer_length(row['REF'], row['ALT']), axis=1)
-            # Don't filter by length at load time - let optimizer handle it
-            # df = df[df['abs_length'] < max_length]
-        
-        # Calculate midparage if parental ages exist
-        if 'paternal_age' in df.columns and 'maternal_age' in df.columns:
-            df['midparage'] = (df['paternal_age'] + df['maternal_age']) / 2
+        df = cls._normalize_columns(
+            df, sample_col, paternal_age_col, maternal_age_col, reference_col, alternate_col
+        )
+        df = cls._add_computed_columns(df)
 
         # Dynamically detect and convert numeric columns
         # Try to convert all object-type columns to numeric
@@ -126,14 +101,100 @@ class VariantDataset:
             for col in required_cols:
                 if col in df.columns and df[col].dtype == 'object':
                     df[col] = pd.to_numeric(df[col], errors='coerce')
-        
+
         metadata = {
             'source': str(path),
             'n_variants': len(df),
             'variant_types': df['var_type'].value_counts().to_dict() if 'var_type' in df else {}
         }
-        
+
         return cls(variants=df, metadata=metadata)
+
+    @classmethod
+    def from_parquet(
+        cls,
+        path: Path,
+        sample_col: str = 'SAMPLE',
+        paternal_age_col: str = 'paternal_age',
+        maternal_age_col: str = 'maternal_age',
+        reference_col: str = 'ref',
+        alternate_col: str = 'alt',
+        required_cols: Optional[List[str]] = None,
+    ) -> 'VariantDataset':
+        """Load from a Parquet file.
+
+        Much faster than from_tsv on large inputs because Parquet preserves dtypes,
+        so we skip the per-column object->numeric scan that dominates TSV load time.
+        """
+        df = pd.read_parquet(path)
+
+        df = cls._normalize_columns(
+            df, sample_col, paternal_age_col, maternal_age_col, reference_col, alternate_col
+        )
+        df = cls._add_computed_columns(df)
+
+        if required_cols:
+            for col in required_cols:
+                if col in df.columns and df[col].dtype == 'object':
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        metadata = {
+            'source': str(path),
+            'n_variants': len(df),
+            'variant_types': df['var_type'].value_counts().to_dict() if 'var_type' in df else {}
+        }
+
+        return cls(variants=df, metadata=metadata)
+
+    @staticmethod
+    def _normalize_columns(
+        df: pd.DataFrame,
+        sample_col: str,
+        paternal_age_col: str,
+        maternal_age_col: str,
+        reference_col: str,
+        alternate_col: str,
+    ) -> pd.DataFrame:
+        """Rename input columns to the canonical SAMPLE / paternal_age / REF / ALT names."""
+        if sample_col != 'SAMPLE' and sample_col in df.columns:
+            df.rename(columns={sample_col: 'SAMPLE'}, inplace=True)
+
+        if paternal_age_col != 'paternal_age' and paternal_age_col in df.columns:
+            df.rename(columns={paternal_age_col: 'paternal_age'}, inplace=True)
+
+        if maternal_age_col != 'maternal_age' and maternal_age_col in df.columns:
+            df.rename(columns={maternal_age_col: 'maternal_age'}, inplace=True)
+
+        if reference_col != 'REF' and reference_col in df.columns:
+            df.rename(columns={reference_col: 'REF'}, inplace=True)
+        elif reference_col.lower() != 'ref':
+            for old in ['Ref', 'Reference', 'ref', 'reference']:
+                if old in df.columns and old != reference_col:
+                    df.rename(columns={old: 'REF'}, inplace=True)
+                    break
+
+        if alternate_col != 'ALT' and alternate_col in df.columns:
+            df.rename(columns={alternate_col: 'ALT'}, inplace=True)
+        elif alternate_col.lower() != 'alt':
+            for old in ['Alt', 'Alternate', 'alt', 'alternate', 'Variant']:
+                if old in df.columns and old != alternate_col:
+                    df.rename(columns={old: 'ALT'}, inplace=True)
+                    break
+
+        return df
+
+    @classmethod
+    def _add_computed_columns(cls, df: pd.DataFrame) -> pd.DataFrame:
+        """Add var_type, length, abs_length, midparage if the source columns are present."""
+        if 'REF' in df.columns and 'ALT' in df.columns:
+            df['var_type'] = cls._get_var_type(df)
+            df['length'] = df['ALT'].str.len() - df['REF'].str.len()
+            df['abs_length'] = np.abs(df['length'])
+
+        if 'paternal_age' in df.columns and 'maternal_age' in df.columns:
+            df['midparage'] = (df['paternal_age'] + df['maternal_age']) / 2
+
+        return df
     
     @staticmethod
     def _get_var_type(df: pd.DataFrame) -> pd.Series:

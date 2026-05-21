@@ -9,6 +9,7 @@ import sys
 
 from .api import optimize_filters, run_optimisation, StageRunner
 from .config import PipelineConfig, PRESETS
+from .convert import convert_command
 from .data import VariantDataset
 
 
@@ -17,6 +18,9 @@ app = typer.Typer(
     help="Three-stage Bayesian optimisation for genomic variant filtering",
     add_completion=False
 )
+
+
+app.command("convert")(convert_command)
 
 
 def setup_logging(verbose: int):
@@ -227,7 +231,7 @@ def validate(
     typer.echo(f"Validating {data}...")
     
     try:
-        dataset = VariantDataset.from_tsv(data)
+        dataset = VariantDataset.from_path(data)
         summary = dataset.summary
         
         typer.echo(f"✓ Successfully loaded {summary['n_variants']} variants")
@@ -253,7 +257,7 @@ def validate(
         
         if reference:
             typer.echo(f"\nValidating reference {reference}...")
-            ref_dataset = VariantDataset.from_tsv(reference)
+            ref_dataset = VariantDataset.from_path(reference)
             ref_summary = ref_dataset.summary
             
             typer.echo(f"✓ Successfully loaded {ref_summary['n_variants']} reference variants")
