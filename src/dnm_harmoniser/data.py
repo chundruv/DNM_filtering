@@ -244,6 +244,18 @@ class VariantDataset:
                     df.rename(columns={old: 'ALT'}, inplace=True)
                     break
 
+        if 'CHROM' not in df.columns:
+            for old in ['#CHROM', 'chrom', 'chr', 'CHR', 'chromosome', 'Chromosome']:
+                if old in df.columns:
+                    df.rename(columns={old: 'CHROM'}, inplace=True)
+                    break
+
+        if 'POS' not in df.columns:
+            for old in ['pos', 'Pos', 'position', 'Position']:
+                if old in df.columns:
+                    df.rename(columns={old: 'POS'}, inplace=True)
+                    break
+
         return df
 
     @classmethod

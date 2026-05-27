@@ -90,6 +90,17 @@ class OptimisationArrays:
     n_variants: int
 
 
+@dataclass(frozen=True)
+class SearchSpaceSpec:
+    """Precomputed parameter search space for a single optimization column."""
+    column: str
+    dtype: str
+    optimisation: str
+    lower: float
+    upper: float
+    symmetric_scale: Optional[float] = None
+
+
 def extract_optimisation_arrays(
     df: pd.DataFrame,
     filter_columns: List[str],
@@ -266,6 +277,8 @@ class MemoryEfficientPipeline:
         logger.info("="*60)
         logger.info("Starting MEMORY-EFFICIENT three-stage optimisation pipeline")
         logger.info("="*60)
+
+        self._collect_trial_history = bool(generate_plots and output_dir)
         
         # Log initial memory usage
         self._log_memory_usage("Initial")
@@ -848,6 +861,7 @@ class MemoryEfficientPipeline:
             Tuple of (best_params, best_score, study, trial_history)
         """
         
+        collect_trial_history = getattr(self, '_collect_trial_history', False)
         trial_history = []
         
         if arrays.n_variants == 0:
@@ -909,17 +923,19 @@ class MemoryEfficientPipeline:
         pat_mean = np.mean(valid_pat_ages)
         pat_centered = valid_pat_ages - pat_mean
         pat_var_sum = np.sum(pat_centered ** 2)
+        search_specs, linked_groups = self._build_search_space_specs(arrays, var_type)
+        is_cmaes = self.config.stage3.sampler == 'cmaes'
 
         def objective(trial):
             # A. Suggest Parameters
-            params = self._suggest_params_for_arrays(trial, arrays, var_type)
+            params = self._suggest_params_for_arrays(trial, search_specs, linked_groups, is_cmaes)
             
             # B. Apply Filters
             mask = apply_filters_mask(arrays, params)
             
             # C. Count variants per sample
             counts = count_per_sample_fast(arrays.sample_ids, mask, arrays.n_samples)
-            valid_counts = counts[valid_sample_indices].astype(np.float64)
+            valid_counts = counts[valid_sample_indices]
             
             # D. Check for degenerate solutions
             if valid_counts.sum() == 0:
@@ -1047,15 +1063,16 @@ class MemoryEfficientPipeline:
                     loss = loss + vaf_weight * vaf_penalty
             
             # H. Track trial history for plotting
-            trial_history.append({
-                'trial_number': trial.number,
-                'slope': slope,
-                'intercept': intercept,
-                'loss': loss,
-                'slope_error': slope_error,
-                'intercept_error': intercept_error,
-                'vaf_penalty': vaf_penalty,
-            })
+            if collect_trial_history:
+                trial_history.append({
+                    'trial_number': trial.number,
+                    'slope': slope,
+                    'intercept': intercept,
+                    'loss': loss,
+                    'slope_error': slope_error,
+                    'intercept_error': intercept_error,
+                    'vaf_penalty': vaf_penalty,
+                })
             
             return loss
         
@@ -1098,7 +1115,7 @@ class MemoryEfficientPipeline:
         best_params = study.best_params
         mask = apply_filters_mask(arrays, best_params)
         counts = count_per_sample_fast(arrays.sample_ids, mask, arrays.n_samples)
-        valid_counts = counts[valid_sample_indices].astype(np.float64)
+        valid_counts = counts[valid_sample_indices]
         
         # Detailed logging for debugging mismatch with plots
         n_with_variants = np.sum(valid_counts > 0)
@@ -1145,98 +1162,60 @@ class MemoryEfficientPipeline:
     def _suggest_params_for_arrays(
         self,
         trial: optuna.Trial,
-        arrays: OptimisationArrays,
-        var_type: str
+        search_specs: List[SearchSpaceSpec],
+        linked_groups: List[List[str]],
+        is_cmaes: bool,
     ) -> Dict[str, Any]:
-        """Suggest parameters using pre-extracted arrays."""
+        """Suggest parameters from precomputed search space specs."""
         params = {}
-        
-        opt_columns = self.config.optimisation.get_optimisation_columns_for_variant_type(var_type)
-        if not opt_columns:
+
+        if not search_specs:
             return params
-        
-        is_cmaes = self.config.stage3.sampler == 'cmaes'
-        
-        # Build skip columns for linked groups
-        linked_groups = self.config.optimisation.get_linked_column_groups()
-        skip_columns = set()
-        for group in linked_groups:
-            if len(group) >= 2:
-                for col_config in group[1:]:
-                    skip_columns.add(col_config.name)
-        
-        for col_config in opt_columns:
-            col = col_config.name
-            
-            if col in skip_columns:
-                continue
-            
-            # Check if column exists in arrays
-            if not col_config.computed and col not in arrays.filter_arrays:
-                continue
-            
-            # Get bounds
-            if col_config.range_constraint:
-                lower = col_config.range_constraint.min
-                upper = col_config.range_constraint.max
-            elif col_config.computed:
-                continue
-            else:
-                col_data = arrays.filter_arrays[col]
-                col_data = col_data[~np.isnan(col_data)]
-                if len(col_data) == 0:
-                    continue
-                
-                if col_config.optimisation == 'minimum':
-                    lower = float(np.nanpercentile(col_data, 10))
-                    upper = float(np.nanmax(col_data))
-                else:  # maximum
-                    lower = float(np.nanmin(col_data))
-                    upper = float(np.nanpercentile(col_data, 90))
-            
-            if trial.number == 0:
-                prefix = 'max' if col_config.optimisation == 'minimum' else 'min'
-                logger.info(f"  {prefix}_{col} search space: [{lower:.2f}, {upper:.2f}]")
-            
+
+        for spec in search_specs:
+            col = spec.column
+            lower = spec.lower
+            upper = spec.upper
+
             # Suggest value
-            if col_config.optimisation == 'minimum':
-                if col_config.dtype == 'int' and not is_cmaes:
+            if spec.optimisation == 'minimum':
+                if spec.dtype == 'int' and not is_cmaes:
                     params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower), int(upper))
                 else:
                     value = trial.suggest_float(f'max_{col}', float(lower), float(upper))
                     # Clip to bounds for CMA-ES (it can sample outside bounds)
                     value = max(lower, min(upper, value))
-                    params[f'max_{col}'] = int(round(value)) if col_config.dtype == 'int' else value
-            
-            elif col_config.optimisation == 'maximum':
-                if col_config.dtype == 'int' and not is_cmaes:
+                    params[f'max_{col}'] = int(round(value)) if spec.dtype == 'int' else value
+
+            elif spec.optimisation == 'maximum':
+                if spec.dtype == 'int' and not is_cmaes:
                     params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower), int(upper))
                 else:
                     value = trial.suggest_float(f'min_{col}', float(lower), float(upper))
                     # Clip to bounds for CMA-ES
                     value = max(lower, min(upper, value))
-                    params[f'min_{col}'] = int(round(value)) if col_config.dtype == 'int' else value
-            
-            elif col_config.optimisation == 'range':
-                if hasattr(col_config.range_constraint, 'lower') and hasattr(col_config.range_constraint, 'scale'):
+                    params[f'min_{col}'] = int(round(value)) if spec.dtype == 'int' else value
+
+            elif spec.optimisation == 'range':
+                if spec.symmetric_scale is not None:
                     # Symmetric range
-                    lower_bound = col_config.range_constraint.lower
-                    upper_bound = col_config.range_constraint.scale - col_config.range_constraint.lower
-                    
-                    if col_config.dtype == 'int' and not is_cmaes:
+                    lower_bound = lower
+                    upper_bound = spec.symmetric_scale - lower
+
+                    if spec.dtype == 'int' and not is_cmaes:
                         suggested_lower = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
                     else:
                         value = trial.suggest_float(f'min_{col}', float(lower_bound), float(upper_bound))
                         # Clip to bounds for CMA-ES
                         value = max(lower_bound, min(upper_bound, value))
-                        suggested_lower = int(round(value)) if col_config.dtype == 'int' else value
-                    
-                    suggested_upper = col_config.range_constraint.scale - suggested_lower
+                        suggested_lower = int(round(value)) if spec.dtype == 'int' else value
+
+                    suggested_upper = spec.symmetric_scale - suggested_lower
                     params[f'min_{col}'] = suggested_lower
                     params[f'max_{col}'] = suggested_upper
                 else:
                     # Regular range
-                    if col_config.dtype == 'int' and not is_cmaes:
+                    if spec.dtype == 'int' and not is_cmaes:
                         params[f'min_{col}'] = trial.suggest_int(f'min_{col}', int(lower), int(upper))
                         params[f'max_{col}'] = trial.suggest_int(f'max_{col}', int(lower), int(upper))
                     else:
@@ -1245,7 +1224,7 @@ class MemoryEfficientPipeline:
                         # Clip to bounds for CMA-ES
                         value_min = max(lower, min(upper, value_min))
                         value_max = max(lower, min(upper, value_max))
-                        if col_config.dtype == 'int':
+                        if spec.dtype == 'int':
                             params[f'min_{col}'] = int(round(value_min))
                             params[f'max_{col}'] = int(round(value_max))
                         else:
@@ -1257,7 +1236,7 @@ class MemoryEfficientPipeline:
             if len(group) < 2:
                 continue
             
-            first_col = group[0].name
+            first_col = group[0]
             param_keys = [k for k in params.keys() if k.endswith(f'_{first_col}')]
             
             for key in param_keys:
@@ -1265,10 +1244,80 @@ class MemoryEfficientPipeline:
                 prefix = key.split('_')[0]
                 
                 for linked_col in group[1:]:
-                    linked_key = f'{prefix}_{linked_col.name}'
+                    linked_key = f'{prefix}_{linked_col}'
                     params[linked_key] = param_value
         
         return params
+
+    def _build_search_space_specs(
+        self,
+        arrays: OptimisationArrays,
+        var_type: str,
+    ) -> Tuple[List[SearchSpaceSpec], List[List[str]]]:
+        """Precompute search-space bounds once per optimization run."""
+        opt_columns = self.config.optimisation.get_optimisation_columns_for_variant_type(var_type)
+        if not opt_columns:
+            return [], []
+
+        raw_linked_groups = self.config.optimisation.get_linked_column_groups()
+        skip_columns = set()
+        for group in raw_linked_groups:
+            if len(group) >= 2:
+                for col_config in group[1:]:
+                    skip_columns.add(col_config.name)
+
+        specs: List[SearchSpaceSpec] = []
+        active_columns = set()
+        for col_config in opt_columns:
+            col = col_config.name
+            if col in skip_columns:
+                continue
+            if col_config.computed and not col_config.range_constraint:
+                continue
+            if not col_config.computed and col not in arrays.filter_arrays:
+                continue
+
+            if col_config.range_constraint:
+                lower = float(col_config.range_constraint.min)
+                upper = float(col_config.range_constraint.max)
+            else:
+                col_data = arrays.filter_arrays[col]
+                col_data = col_data[~np.isnan(col_data)]
+                if len(col_data) == 0:
+                    continue
+
+                if col_config.optimisation == 'minimum':
+                    lower = float(np.nanpercentile(col_data, 10))
+                    upper = float(np.nanmax(col_data))
+                else:
+                    lower = float(np.nanmin(col_data))
+                    upper = float(np.nanpercentile(col_data, 90))
+
+            specs.append(
+                SearchSpaceSpec(
+                    column=col,
+                    dtype=col_config.dtype,
+                    optimisation=col_config.optimisation,
+                    lower=lower,
+                    upper=upper,
+                    symmetric_scale=(
+                        float(col_config.range_constraint.scale)
+                        if hasattr(col_config.range_constraint, 'scale') else None
+                    ),
+                )
+            )
+            active_columns.add(col)
+
+        for spec in specs:
+            prefix = 'max' if spec.optimisation == 'minimum' else 'min'
+            logger.info(f"  {prefix}_{spec.column} search space: [{spec.lower:.2f}, {spec.upper:.2f}]")
+
+        linked_groups = [
+            [col_config.name for col_config in group]
+            for group in raw_linked_groups
+            if group and group[0].name in active_columns
+        ]
+        return specs, linked_groups
 
 
 # Alias for backward compatibility

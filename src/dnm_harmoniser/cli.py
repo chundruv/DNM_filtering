@@ -56,7 +56,8 @@ def run(
     ),
     verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Increase verbosity"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show configuration without running"),
-    memory_efficient: bool = typer.Option(False, "--memory-efficient", "-m", help="Use memory-efficient pipeline for large datasets")
+    memory_efficient: bool = typer.Option(False, "--memory-efficient", "-m", help="Use memory-efficient pipeline for large datasets"),
+    generate_plots: bool = typer.Option(True, "--plots/--no-plots", help="Generate result plots and filtered output files")
 ):
     """
     Run three-stage variant filtering optimisation.
@@ -173,7 +174,7 @@ def run(
             reference=reference,
             config=pipeline_config,
             output_dir=output,          # Pass output directory for automatic plotting
-            generate_plots=True,        # Enable automatic plotting
+            generate_plots=generate_plots,
             memory_efficient=memory_efficient  # Use memory-efficient pipeline if requested
         )
 

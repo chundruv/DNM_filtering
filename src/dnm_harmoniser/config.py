@@ -78,6 +78,12 @@ import yaml
 import os
 
 
+COORDINATE_COLUMN_CANDIDATES = [
+    'CHROM', '#CHROM', 'chrom', 'chr', 'CHR', 'chromosome', 'Chromosome',
+    'POS', 'pos', 'Pos', 'position', 'Position'
+]
+
+
 class Stage1Config(BaseModel):
     """Warmup stage configuration."""
     enabled: bool = True
@@ -460,6 +466,7 @@ class OptimisationConfig(BaseModel):
             - sample / paternal_age / maternal_age / REF / ALT (raw names per side)
             - every column in self.columns that isn't `computed`
             - vaf_column when a VAF quality metric is configured
+            - common chromosome / position fields so filtered outputs retain coordinates
         """
         if side == "data":
             metadata = [
@@ -485,7 +492,7 @@ class OptimisationConfig(BaseModel):
 
         seen = set()
         ordered: List[str] = []
-        for name in metadata + filter_cols:
+        for name in metadata + filter_cols + COORDINATE_COLUMN_CANDIDATES:
             if name and name not in seen:
                 seen.add(name)
                 ordered.append(name)
