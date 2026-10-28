@@ -108,6 +108,13 @@ optimisation:
   regression_weights: [1.0, 5.0]
   loss_function: weighted_mse
 
+  # VAF quality penalty (expects VAF on a 0-1 scale)
+  vaf_quality_metric: kl_divergence  # Options: mean, proportion, skewness, kl_divergence, null
+  vaf_quality_weight: 0.1
+  vaf_column: VAF
+  vaf_min: 0.25
+  vaf_max: 0.75
+
 # Performance settings
 max_workers: 32
 use_cache: true
