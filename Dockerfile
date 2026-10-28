@@ -29,7 +29,7 @@ WORKDIR /home/optimizer
 
 # Copy package
 COPY --chown=optimizer:optimizer src/ ./src/
-COPY --chown=optimizer:optimizer pyproject.toml .
+COPY --chown=optimizer:optimizer pyproject.toml README.md ./
 
 # Install package in development mode
 RUN pip install -e .
@@ -38,12 +38,12 @@ RUN pip install -e .
 RUN mkdir -p data results cache
 
 # Default command
-CMD ["variant-optimize", "--help"]
+CMD ["dnm-harmoniser", "--help"]
 
 # Usage:
-# docker build -t variant-optimizer .
+# docker build -t dnm-harmoniser .
 # docker run -v $(pwd)/data:/home/optimizer/data \
 #            -v $(pwd)/results:/home/optimizer/results \
-#            variant-optimizer \
-#            variant-optimize data/variants.tsv data/reference.tsv \
+#            dnm-harmoniser \
+#            dnm-harmoniser run data/variants.tsv data/reference.tsv \
 #            --output results --preset balanced

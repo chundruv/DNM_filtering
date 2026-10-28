@@ -1,24 +1,27 @@
 """Configuration models with validation using Pydantic.
 
 Required Metadata Column Names:
-    Specify the column names in your data for:
-    - sample_id_column: Column name for sample IDs (default: "sample_id")
-    - paternal_age_column: Column name for paternal age (default: "paternal_age")
-    - maternal_age_column: Column name for maternal age (default: "maternal_age")
-    - reference_column: Column name for reference allele (default: "ref")
+    Specify the column names separately for the input data (*_data) and the
+    reference data (*_reference):
+    - sample_id_column_*: Column name for sample IDs (default: "sample_id")
+    - paternal_age_column_*: Column name for paternal age (default: "paternal_age")
+    - maternal_age_column_*: Column name for maternal age (default: "maternal_age")
+    - reference_column_*: Column name for reference allele (default: "ref")
+    - alternate_column_*: Column name for alternate allele (default: "alt")
 
 Column Configuration:
     Each column can be configured with:
     - name: Column name in the dataframe
     - dtype: Data type (int, float, or str)
     - optimisation: Strategy to apply
-        * "minimum": Set lower bound threshold
-        * "maximum": Set upper bound threshold
-        * "range": Keep values within specified range
+        * "minimum": Keep low values (optimises an upper threshold, max_<name>)
+        * "maximum": Keep high values (optimises a lower threshold, min_<name>)
+        * "range": Keep values within an optimised [lower, upper] range
         * "none": No thresholding (for other metadata columns)
-    - range_constraint: Required only when optimisation="range"
-        * min: Minimum allowed value
-        * max: Maximum allowed value
+    - range_constraint: Required when optimisation="range" or computed=True;
+      optional otherwise, where it bounds the search space
+        * min / max: Explicit bounds (RangeConstraint)
+        * lower / scale: Symmetric bounds, upper = scale - lower (SymmetricRangeConstraint)
     - linked_to: Optional name of another column to link with
         * Linked columns will always use the same threshold
         * Both columns must have the same optimisation type
@@ -30,10 +33,11 @@ Column Configuration:
 Example:
     optimisation = OptimisationConfig(
         # Specify your column names
-        sample_id_column="SampleID",
-        paternal_age_column="Father_Age",
-        maternal_age_column="Mother_Age",
-        reference_column="REF",
+        sample_id_column_data="SampleID",
+        paternal_age_column_data="Father_Age",
+        maternal_age_column_data="Mother_Age",
+        reference_column_data="REF",
+        alternate_column_data="ALT",
 
         # Configure other columns for optimisation
         columns=[
@@ -78,10 +82,10 @@ import yaml
 import os
 
 
-COORDINATE_COLUMN_CANDIDATES = [
-    'CHROM', '#CHROM', 'chrom', 'chr', 'CHR', 'chromosome', 'Chromosome',
-    'POS', 'pos', 'Pos', 'position', 'Position'
-]
+# Column names recognised as chromosome / position when not set explicitly in the config
+CHROM_COLUMN_CANDIDATES = ['CHROM', '#CHROM', 'chrom', 'chr', 'Chr', 'CHR', 'chromosome', 'Chromosome']
+POS_COLUMN_CANDIDATES = ['POS', 'pos', 'Pos', 'position', 'Position']
+COORDINATE_COLUMN_CANDIDATES = CHROM_COLUMN_CANDIDATES + POS_COLUMN_CANDIDATES
 
 
 class Stage1Config(BaseModel):
@@ -100,8 +104,8 @@ class Stage1Config(BaseModel):
 class Stage2Config(BaseModel):
     """Outlier removal stage."""
     enabled: bool = True
-    min_dnm_count: Optional[int] = Field(5, gt=0, description="Minimum filtered DNMs")
-    max_dnm_count: Optional[int] = Field(300, gt=0, description="Maximum filtered DNMs")
+    min_dnm_count: Optional[int] = Field(5, gt=0, description="Minimum filtered DNMs per sample; samples below are removed")
+    max_dnm_count: Optional[int] = Field(300, gt=0, description="Maximum filtered DNMs per sample; samples above are removed")
     
     @field_validator('max_dnm_count')
     @classmethod
@@ -117,6 +121,7 @@ class Stage3Config(BaseModel):
     enabled: bool = True
     n_trials: int = Field(500, gt=0, description="Number of optimisation trials")
     sampler: Literal["tpe", "cmaes", "random"] = "tpe"
+    # pruner and multivariate are currently ignored: pruning is always off and TPE is always multivariate
     pruner: Optional[Literal["successive_halving", "hyperband", "median"]] = "successive_halving"
     multivariate: bool = True
 
@@ -273,10 +278,31 @@ class OptimisationConfig(BaseModel):
         description="Column name for alternate allele in the reference data"
     )
 
+    # Optional coordinate column names. If unset, common names are detected
+    # (see CHROM_COLUMN_CANDIDATES / POS_COLUMN_CANDIDATES). Either way they are
+    # renamed to CHROM / POS and kept in filtered_variants.tsv.
+    chromosome_column_data: Optional[str] = Field(
+        None,
+        description="Column name for chromosome in the input data (default: auto-detect)"
+    )
+    position_column_data: Optional[str] = Field(
+        None,
+        description="Column name for position in the input data (default: auto-detect)"
+    )
+    chromosome_column_reference: Optional[str] = Field(
+        None,
+        description="Column name for chromosome in the reference data (default: auto-detect)"
+    )
+    position_column_reference: Optional[str] = Field(
+        None,
+        description="Column name for position in the reference data (default: auto-detect)"
+    )
+
     columns: List[ColumnConfig] = Field(
         default_factory=list,
         description="Column configurations with types and optimisation criteria"
     )
+    # Currently ignored: the pipeline always fits dnm_count ~ paternal_age
     regression_formula: str = "dnm_count ~ paternal_age"
     regression_weights: List[float] = [1.0, 1.0]
     regression_weights_by_type: Optional[Dict[str, List[float]]] = Field(
@@ -293,7 +319,7 @@ class OptimisationConfig(BaseModel):
         "max_slope"
     ] = Field(
         "weighted_mse",
-        description="Loss function for optimization. Options: weighted_mse (default), absolute, huber, log_ratio, slope_priority, asymmetric, max_slope"
+        description="Loss function for optimization. Options: weighted_mse (default), absolute, huber, log_ratio, slope_priority, asymmetric, max_slope. (correlation is also available via loss_function_by_type.)"
     )
     
     # VAF quality penalty
@@ -466,7 +492,8 @@ class OptimisationConfig(BaseModel):
             - sample / paternal_age / maternal_age / REF / ALT (raw names per side)
             - every column in self.columns that isn't `computed`
             - vaf_column when a VAF quality metric is configured
-            - common chromosome / position fields so filtered outputs retain coordinates
+            - the configured chromosome / position columns, plus common names for
+              them, so filtered outputs retain coordinates
         """
         if side == "data":
             metadata = [
@@ -475,6 +502,8 @@ class OptimisationConfig(BaseModel):
                 self.maternal_age_column_data,
                 self.reference_column_data,
                 self.alternate_column_data,
+                self.chromosome_column_data,
+                self.position_column_data,
             ]
         else:
             metadata = [
@@ -483,6 +512,8 @@ class OptimisationConfig(BaseModel):
                 self.maternal_age_column_reference,
                 self.reference_column_reference,
                 self.alternate_column_reference,
+                self.chromosome_column_reference,
+                self.position_column_reference,
             ]
 
         filter_cols = [col.name for col in self.columns if not col.computed]

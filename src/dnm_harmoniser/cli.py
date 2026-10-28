@@ -37,8 +37,8 @@ def setup_logging(verbose: int):
 
 @app.command()
 def run(
-    data: Path = typer.Argument(..., help="Path to variant data TSV file"),
-    reference: Path = typer.Argument(..., help="Path to reference data TSV file"),
+    data: Path = typer.Argument(..., help="Path to variant data (TSV or Parquet)"),
+    reference: Path = typer.Argument(..., help="Path to reference data (TSV or Parquet)"),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="Configuration file (YAML)"),
     preset: Optional[str] = typer.Option(
         "balanced", "--preset", "-p",
@@ -56,7 +56,7 @@ def run(
     ),
     verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Increase verbosity"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show configuration without running"),
-    memory_efficient: bool = typer.Option(False, "--memory-efficient", "-m", help="Use memory-efficient pipeline for large datasets"),
+    memory_efficient: bool = typer.Option(False, "--memory-efficient", "-m", help="Currently has no effect (both pipelines are the same)"),
     generate_plots: bool = typer.Option(True, "--plots/--no-plots", help="Generate result plots and filtered output files")
 ):
     """
@@ -65,25 +65,23 @@ def run(
     Examples:
     
         # Basic usage with default settings
-        variant-optimize data.tsv reference.tsv
+        dnm-harmoniser run data.tsv reference.tsv
         
         # Fast testing
-        variant-optimize data.tsv reference.tsv --preset fast
+        dnm-harmoniser run data.tsv reference.tsv --preset fast
         
         # Thorough optimisation with custom trials
-        variant-optimize data.tsv reference.tsv --preset thorough --n-trials 1000
+        dnm-harmoniser run data.tsv reference.tsv --preset thorough --n-trials 1000
         
         # Custom outlier removal thresholds
-        variant-optimize data.tsv reference.tsv --min-dnm 10 --max-dnm 200
+        dnm-harmoniser run data.tsv reference.tsv --min-dnm 10 --max-dnm 200
         
         # Use configuration file with overrides
-        variant-optimize data.tsv reference.tsv -c config.yaml -O stage3.n_trials=1000
+        dnm-harmoniser run data.tsv reference.tsv -c config.yaml -O stage3.n_trials=1000
         
         # Parallel processing with 8 workers
-        variant-optimize data.tsv reference.tsv --workers 8
+        dnm-harmoniser run data.tsv reference.tsv --workers 8
         
-        # Memory-efficient mode for large datasets
-        variant-optimize data.tsv reference.tsv --memory-efficient
     """
     setup_logging(verbose)
     
@@ -178,7 +176,7 @@ def run(
             memory_efficient=memory_efficient  # Use memory-efficient pipeline if requested
         )
 
-        # Results are already saved by run_optimisation, but save again for backward compatibility
+        # run_optimisation doesn't write these, so save them here
         with open(output / "optimal_params.yaml", 'w') as f:
             yaml.dump(result.best_params, f, default_flow_style=False)
 
@@ -220,14 +218,15 @@ def show_presets():
 
 @app.command()
 def validate(
-    data: Path = typer.Argument(..., help="Path to variant data TSV file"),
-    reference: Optional[Path] = typer.Option(None, help="Path to reference data TSV file"),
+    data: Path = typer.Argument(..., help="Path to variant data (TSV or Parquet)"),
+    reference: Optional[Path] = typer.Option(None, help="Path to reference data (TSV or Parquet)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed information")
 ):
     """
     Validate data files and show statistics.
     
-    Useful for checking data before running optimisation.
+    Useful for checking data before running optimisation. Uses the default
+    column names (SAMPLE, paternal_age, maternal_age, ref, alt), not a config file.
     """
     typer.echo(f"Validating {data}...")
     
@@ -328,7 +327,7 @@ def init(
     # Save configuration
     config.to_yaml(output)
     typer.echo(f"\nConfiguration saved to {output}")
-    typer.echo(f"Use with: variant-optimize data.tsv reference.tsv --config {output}")
+    typer.echo(f"Use with: dnm-harmoniser run data.tsv reference.tsv --config {output}")
 
 
 if __name__ == "__main__":

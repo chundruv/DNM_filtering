@@ -11,7 +11,7 @@ stage3:
   enabled: true
   n_trials: 2000
   sampler: tpe  # Options: tpe, cmaes, random
-  pruner: null  # Options: successive_halving, hyperband, median, null
+  pruner: null  # Currently ignored: pruning is always disabled
   multivariate: true
 
 optimisation:
@@ -65,25 +65,6 @@ optimisation:
       dtype: int
       optimisation: maximum
       linked_to: father_coverage
-
-    # Keep allele balance within a symmetric range
-    - name: VAF
-      dtype: float
-      optimisation: range
-      range_constraint:
-        lower: 15
-        scale: 100
-
-    # IMF with regular (non-symmetric) range
-    - name: IMF
-      dtype: float
-      optimisation: range
-      range_constraint:
-        lower: 0.15
-        scale: 1
-      variant_types:
-        - Insertion
-        - Deletion
 
   regression_formula: "dnm_count ~ paternal_age"
   regression_weights: [1.0, 5.0]

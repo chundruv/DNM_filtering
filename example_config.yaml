@@ -13,8 +13,8 @@ stage3:
   enabled: true
   n_trials: 500
   sampler: tpe  # Options: tpe, cmaes, random
-  pruner: successive_halving  # Options: successive_halving, hyperband, median, null
-  multivariate: true
+  pruner: successive_halving  # Currently ignored: pruning is always disabled
+  multivariate: true  # Currently ignored: TPE is always multivariate
 
 optimisation:
   variant_types:
@@ -28,6 +28,9 @@ optimisation:
   maternal_age_column_data: maternal_age
   reference_column_data: ref
   alternate_column_data: alt
+  # Optional: chromosome / position columns, if not a common name (CHROM, chr, Chr, POS, pos, Position, ...)
+  # chromosome_column_data: chromosome
+  # position_column_data: start
 
   # Required metadata column names in reference data
   sample_id_column_reference: sample_id
@@ -58,7 +61,7 @@ optimisation:
         max: 200
 
     # Keep allele balance within a symmetric range
-    # Using symmetric_range_constraint where upper = 1 - lower
+    # range_constraint with lower/scale gives upper = scale - lower
     - name: allele_balance
       dtype: float
       optimisation: range
@@ -114,19 +117,6 @@ optimisation:
         - Deletion
       computed: true  # This column is calculated from REF/ALT, not in raw input
 
-    # Deletion-only: homopolymer length (longest run of repeated nucleotides)
-    # Calculated from REF/ALT sequences - longer homopolymers indicate likely real variants
-    # optimisation: maximum means "keep high values" - real deletions often in repetitive regions
-    - name: homopolymer_length
-      dtype: int
-      optimisation: maximum
-      range_constraint:
-        min: 1
-        max: 20
-      variant_types:
-        - Deletion
-      computed: true  # Calculated from REF/ALT sequences
-
     # Linked columns (share the same threshold)
     # Useful for father/mother depth that should have the same minimum
     - name: depth_father
@@ -139,7 +129,7 @@ optimisation:
       optimisation: maximum
       linked_to: depth_father
 
-  regression_formula: "dnm_count ~ paternal_age"
+  regression_formula: "dnm_count ~ paternal_age"  # Currently ignored: always dnm_count ~ paternal_age
   # Weights for optimization: [intercept_weight, slope_weight, ...]
   # Higher weight = more important to match that coefficient
   # Typical: [0.1, 1.0] gives priority to slope while still considering intercept
@@ -182,7 +172,7 @@ optimisation:
 # Performance settings
 max_workers: 4
 use_cache: true
-cache_dir: null  # null means use default
+cache_dir: null  # null means ./cache (cache is not currently used)
 
 # Reproducibility
 seed: 42

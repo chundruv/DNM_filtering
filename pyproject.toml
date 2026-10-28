@@ -42,6 +42,11 @@ dependencies = [
     "typer>=0.9",
     "joblib>=1.3",
     "pyarrow>=14.0",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+    "tqdm>=4.0",
+    "cmaes>=0.10",  # needed for sampler: cmaes (used by the "thorough" preset)
 ]
 
 [project.optional-dependencies]
@@ -65,9 +70,12 @@ docs = [
     "sphinx-copybutton>=0.5",
 ]
 
-viz = [
-    "matplotlib>=3.7",
-    "seaborn>=0.12",
+# Plotting libraries are now core dependencies; kept so `pip install -e ".[viz]"` still works
+viz = []
+
+# Optional memory usage logging during optimisation
+monitoring = [
+    "psutil>=5.9",
 ]
 
 parallel = [
@@ -76,7 +84,7 @@ parallel = [
 ]
 
 all = [
-    "dnm-harmoniser[dev,docs,viz,parallel]",
+    "dnm-harmoniser[dev,docs,monitoring,parallel]",
 ]
 
 [project.scripts]

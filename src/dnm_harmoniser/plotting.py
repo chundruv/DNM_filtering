@@ -24,9 +24,13 @@ def plot_optimization_results(
     """
     Plot DNMs vs. parental age separately for each parent and variant type.
 
-    Creates a 2x3 grid:
-    - Row 1: Paternal age vs DNMs (SNV, Insertion, Deletion)
-    - Row 2: Maternal age vs DNMs (SNV, Insertion, Deletion)
+    Creates a 3x3 grid (columns: SNV, Insertion, Deletion):
+    - Row 1: Paternal age vs DNMs
+    - Row 2: Maternal age vs DNMs
+    - Row 3: Proband VAF histograms (reference / filtered / unfiltered, range 0.2-0.8)
+
+    Writes optimization_results.png and, if save_filtered, filtered_variants.tsv
+    and filter_summary.txt to output_dir.
 
     Parameters
     ----------
@@ -40,6 +44,9 @@ def plot_optimization_results(
         Directory to save plots and filtered data
     save_filtered : bool
         Whether to save filtered variants to file
+    config : PipelineConfig, optional
+        Used for linked and variant-type-restricted columns, and to pick the
+        VAF column (optimisation.vaf_column)
     """
     if data_df is None or reference_df is None or not best_params:
         logger.warning("Skipping plot due to missing data or optimization results.")
@@ -389,11 +396,12 @@ def plot_optuna_diagnostics(
     """
     Generate Optuna diagnostic plots for each variant type using matplotlib.
     
-    Creates:
-    - Optimization history (loss over trials)
-    - Parameter importance (based on correlation with objective)
-    - Parameter distributions for best trials
-    - Slice plots for each parameter
+    Creates, per variant type in optuna_<type>/:
+    - optimization_history.png (loss over trials)
+    - param_importances.png (|Pearson r| of each parameter with the objective)
+    - slice_plots.png (objective vs each parameter)
+    - parallel_coordinate.png (if >= 2 parameters)
+    - pairwise_scatter.png (top parameters by |r|)
     
     Parameters
     ----------
@@ -647,9 +655,9 @@ def plot_regression_trajectory(
     """
     Plot slope and intercept trajectory over optimization trials.
     
-    Creates a 2-row grid:
-    - Row 1: Slope vs trial number, Intercept vs trial number, Loss vs trial number
-    - Row 2: Slope vs Intercept (Pareto frontier), Slope error vs Intercept error
+    Creates one row per variant type with 5 panels: slope vs trial, intercept vs
+    trial, loss vs trial, slope vs intercept coloured by loss, and squared relative
+    slope error vs intercept error.
     
     Parameters
     ----------
@@ -778,7 +786,8 @@ def plot_regression_trajectory(
                        color='lime', s=150, marker='*', zorder=5, label='Best', 
                        edgecolors='black', linewidths=1)
             
-            # Draw iso-loss contours (slope_error + intercept_error = constant)
+            # Reference lines where slope_error + intercept_error = constant
+            # (iso-loss only for equal-weight weighted_mse without a VAF penalty)
             max_err = max(df.loc[valid_mask, 'slope_error'].max(), 
                          df.loc[valid_mask, 'intercept_error'].max())
             for iso_loss in [0.01, 0.1, 0.5, 1.0]:

@@ -7,6 +7,8 @@ from typing import Optional, Dict, List, Any
 from dataclasses import dataclass, field
 import hashlib
 
+from .config import CHROM_COLUMN_CANDIDATES, POS_COLUMN_CANDIDATES
+
 
 @dataclass
 class VariantDataset:
@@ -66,6 +68,8 @@ class VariantDataset:
         reference_col: str = 'ref',
         alternate_col: str = 'alt',
         required_cols: Optional[List[str]] = None,
+        chrom_col: Optional[str] = None,
+        pos_col: Optional[str] = None,
     ) -> 'VariantDataset':
         """Load from TSV file with automatic preprocessing."""
         df = pd.read_csv(path, sep='\t', on_bad_lines='skip', low_memory=False)
@@ -77,7 +81,8 @@ class VariantDataset:
                 df[col] = df[col].str.replace('"', '', regex=False)
 
         df = cls._normalize_columns(
-            df, sample_col, paternal_age_col, maternal_age_col, reference_col, alternate_col
+            df, sample_col, paternal_age_col, maternal_age_col, reference_col, alternate_col,
+            chrom_col, pos_col,
         )
         df = cls._add_computed_columns(df)
 
@@ -122,6 +127,8 @@ class VariantDataset:
         reference_col: str = 'ref',
         alternate_col: str = 'alt',
         required_cols: Optional[List[str]] = None,
+        chrom_col: Optional[str] = None,
+        pos_col: Optional[str] = None,
         columns: Optional[List[str]] = None,
         dict_encode_strings: bool = True,
         downcast_numerics: bool = True,
@@ -133,12 +140,12 @@ class VariantDataset:
 
         Args:
             columns: If given, only load these columns. Names missing from the file
-                are silently skipped (with a warning). Massive memory win on wide TSVs.
+                are skipped (with a warning). Large memory saving on wide files.
             dict_encode_strings: Dictionary-encode string columns in Arrow before
                 converting to pandas. Turns 200M-row SAMPLE strings into a Categorical
                 with ~20K categories — usually a 10-50x peak-memory reduction.
-            downcast_numerics: Cast int64->int32 and float64->float32 in Arrow when
-                values fit. Halves numeric memory at peak.
+            downcast_numerics: Cast float64->float32 unconditionally (precision loss
+                accepted) and int64->int32 when all values fit. Halves numeric memory.
         """
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -192,7 +199,8 @@ class VariantDataset:
         del table
 
         df = cls._normalize_columns(
-            df, sample_col, paternal_age_col, maternal_age_col, reference_col, alternate_col
+            df, sample_col, paternal_age_col, maternal_age_col, reference_col, alternate_col,
+            chrom_col, pos_col,
         )
         df = cls._add_computed_columns(df)
 
@@ -217,8 +225,10 @@ class VariantDataset:
         maternal_age_col: str,
         reference_col: str,
         alternate_col: str,
+        chrom_col: Optional[str] = None,
+        pos_col: Optional[str] = None,
     ) -> pd.DataFrame:
-        """Rename input columns to the canonical SAMPLE / paternal_age / REF / ALT names."""
+        """Rename input columns to the canonical SAMPLE / paternal_age / maternal_age / REF / ALT / CHROM / POS names."""
         if sample_col != 'SAMPLE' and sample_col in df.columns:
             df.rename(columns={sample_col: 'SAMPLE'}, inplace=True)
 
@@ -244,17 +254,18 @@ class VariantDataset:
                     df.rename(columns={old: 'ALT'}, inplace=True)
                     break
 
-        if 'CHROM' not in df.columns:
-            for old in ['#CHROM', 'chrom', 'chr', 'CHR', 'chromosome', 'Chromosome']:
-                if old in df.columns:
-                    df.rename(columns={old: 'CHROM'}, inplace=True)
-                    break
-
-        if 'POS' not in df.columns:
-            for old in ['pos', 'Pos', 'position', 'Position']:
-                if old in df.columns:
-                    df.rename(columns={old: 'POS'}, inplace=True)
-                    break
+        for canonical, configured, candidates in (
+            ('CHROM', chrom_col, CHROM_COLUMN_CANDIDATES),
+            ('POS', pos_col, POS_COLUMN_CANDIDATES),
+        ):
+            if configured and configured != canonical and configured in df.columns:
+                df.drop(columns=[canonical], errors='ignore', inplace=True)
+                df.rename(columns={configured: canonical}, inplace=True)
+            elif canonical not in df.columns:
+                for old in candidates:
+                    if old in df.columns:
+                        df.rename(columns={old: canonical}, inplace=True)
+                        break
 
         return df
 
@@ -289,11 +300,11 @@ class VariantDataset:
     @staticmethod
     def _get_homopolymer_length(ref: str, alt: str) -> int:
         """
-        Calculate the length of the longest homopolymer (repeated nucleotide) in REF or ALT.
+        Calculate the length of the longest single-base run in the longer allele.
 
-        For deletions: checks the deleted sequence (REF - ALT)
-        For insertions: checks the inserted sequence (ALT - REF)
-        For SNVs: returns 1 (single nucleotide)
+        Scans the whole allele (REF for deletions, ALT for insertions), not just
+        the inserted/deleted bases. Returns 1 for SNVs, 0 for non-string input.
+        Not currently called by the package.
 
         Parameters
         ----------

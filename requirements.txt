@@ -1,4 +1,4 @@
-# Core dependencies for variant-optimizer
+# Core dependencies for dnm-harmoniser (keep in sync with pyproject.toml)
 pandas>=2.0.0
 numpy>=1.24.0
 optuna>=3.3.0
@@ -7,8 +7,10 @@ pyyaml>=6.0.0
 pydantic>=2.0.0
 typer>=0.9.0
 joblib>=1.3.0
+pyarrow>=14.0.0
+scipy>=1.10.0
 matplotlib>=3.7.0
 seaborn>=0.12.0
-
-# Optional: CMA-ES sampler for Optuna (required if using sampler: cmaes)
+tqdm>=4.0.0
+# CMA-ES sampler for Optuna (sampler: cmaes, used by the "thorough" preset)
 cmaes>=0.10.0

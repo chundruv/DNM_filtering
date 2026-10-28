@@ -2,7 +2,7 @@ import pandas as pd
 import sys
 
 def get_homopolymer_length(ref: str, alt: str) -> int:
-    """..."""  # same as before
+    """Length of the longest single-base run in the longer allele (1 for SNVs)."""
     if not isinstance(ref, str) or not isinstance(alt, str):
         return 0
     ref, alt = ref.upper(), alt.upper()
@@ -59,7 +59,7 @@ def process_file_chunked(input_path, output_path, ref_col, alt_col, chunksize=50
     
     print(f"{input_path}: {total_in} → {total_out} variants")
 
-# Process both files
+# Usage: python apply_chunks.py IN.tsv OUT.tsv REF_COL ALT_COL
 process_file_chunked(
     sys.argv[1],
     sys.argv[2],

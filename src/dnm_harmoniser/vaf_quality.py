@@ -6,7 +6,7 @@ VAF distribution is needed — metrics use theoretical expectations for
 true heterozygous germline de novo variants.
 
 Metrics:
-    1. Mean VAF — pulled down by heavy left tail
+    1. Mean VAF — deviation from the expected mean (either direction)
     2. Low-VAF proportion — fraction below a threshold
     3. Skewness — third standardised moment, captures asymmetry
     4. KL divergence — against a truncated normal, captures full shape
@@ -124,13 +124,15 @@ def compute_vaf_penalty(
     Parameters
     ----------
     vaf : np.ndarray
-        VAF values of filtered variants (already within [vaf_min, vaf_max]).
+        VAF values of filtered variants, on a 0-1 scale. Not clipped: values
+        outside [vaf_min, vaf_max] are ignored by the KL histogram but count
+        towards the other metrics.
     variant_type : str
         One of 'SNV', 'Insertion', 'Deletion'.
     metric : str
         Which metric to use: 'mean', 'proportion', 'skewness', 'kl_divergence'.
     vaf_min, vaf_max : float
-        VAF bounds used in filtering.
+        Histogram window for the KL divergence metric.
     n_bins : int
         Number of bins for KL divergence histogram.
 
@@ -208,11 +210,8 @@ def _penalty_kl(
 ) -> float:
     """Penalty based on KL divergence from theoretical truncated normal.
 
-    Returns the KL divergence directly — already a natural penalty
-    where 0 = perfect match. Typical clean data: 0.01-0.02.
-    Typical noisy data: 0.1-0.5+.
-
-    Normalised so KL ~0.1 gives penalty ~1.0.
+    Returns (KL / 0.1)^2, so 0 = perfect match and KL 0.1 gives penalty 1.0.
+    Typical raw KL: clean data 0.01-0.02, noisy data 0.1-0.5+.
     """
     params = EXPECTED_DISTRIBUTION_PARAMS.get(
         variant_type, {"mu": 0.48, "sigma": 0.09}
@@ -249,7 +248,7 @@ class VAFQualityMetrics:
     Parameters
     ----------
     vaf_min, vaf_max : float
-        VAF bounds used in filtering.
+        Histogram window for the KL divergence metric.
     n_bins : int
         Number of bins for KL divergence.
     expected_means, low_vaf_thresholds, distribution_params, expected_skewness : dict

@@ -31,17 +31,19 @@ def optimize_filters(
     Parameters
     ----------
     data_path : str or Path
-        Path to variant data TSV file
+        Path to variant data (TSV or Parquet)
     reference_path : str or Path
-        Path to reference data TSV file
+        Path to reference data (TSV or Parquet)
     n_trials : int, default=100
-        Number of optimisation trials
+        Number of Stage 3 trials (overrides the preset's value)
     preset : str, default="balanced"
         Configuration preset: "fast", "balanced", "thorough", or "noisy_data"
     output_dir : str or Path, optional
         Directory to save results
     seed : int, default=42
         Random seed for reproducibility
+    memory_efficient : bool, default=False
+        Currently has no effect (OptimisationPipeline and MemoryEfficientPipeline are the same class)
     
     Returns
     -------
@@ -76,6 +78,8 @@ def optimize_filters(
         maternal_age_col=config.optimisation.maternal_age_column_data,
         reference_col=config.optimisation.reference_column_data,
         alternate_col=config.optimisation.alternate_column_data,
+        chrom_col=config.optimisation.chromosome_column_data,
+        pos_col=config.optimisation.position_column_data,
         columns=config.optimisation.get_input_columns('data'),
     )
 
@@ -87,6 +91,8 @@ def optimize_filters(
         maternal_age_col=config.optimisation.maternal_age_column_reference,
         reference_col=config.optimisation.reference_column_reference,
         alternate_col=config.optimisation.alternate_column_reference,
+        chrom_col=config.optimisation.chromosome_column_reference,
+        pos_col=config.optimisation.position_column_reference,
         columns=config.optimisation.get_input_columns('reference'),
     )
     
@@ -144,15 +150,18 @@ def run_optimisation(
     reference : VariantDataset, Path, or str
         Reference data (dataset object or path to file)
     config : PipelineConfig, optional
-        Configuration object. If None, loads from config_file or uses defaults
+        Configuration object. If None, built from preset/config_file/kwargs
     config_file : Path, optional
         Path to YAML configuration file
     output_dir : str or Path, optional
         Directory to save plots and filtered results
     generate_plots : bool, default=True
         Whether to automatically generate plots after optimization
+    memory_efficient : bool, default=False
+        Currently has no effect (OptimisationPipeline and MemoryEfficientPipeline are the same class)
     **kwargs
-        Additional configuration overrides
+        `preset` plus configuration overrides (stage3__n_trials=1000 -> stage3.n_trials).
+        Ignored when `config` is given.
 
     Returns
     -------
@@ -211,6 +220,8 @@ def run_optimisation(
             maternal_age_col=config.optimisation.maternal_age_column_data,
             reference_col=config.optimisation.reference_column_data,
             alternate_col=config.optimisation.alternate_column_data,
+            chrom_col=config.optimisation.chromosome_column_data,
+            pos_col=config.optimisation.position_column_data,
             columns=config.optimisation.get_input_columns('data'),
         )
 
@@ -222,6 +233,8 @@ def run_optimisation(
             maternal_age_col=config.optimisation.maternal_age_column_reference,
             reference_col=config.optimisation.reference_column_reference,
             alternate_col=config.optimisation.alternate_column_reference,
+            chrom_col=config.optimisation.chromosome_column_reference,
+            pos_col=config.optimisation.position_column_reference,
             columns=config.optimisation.get_input_columns('reference'),
         )
 
@@ -238,96 +251,86 @@ def run_optimisation(
 class StageRunner:
     """
     Direct control over individual pipeline stages.
-    
-    This interface provides maximum flexibility for researchers
-    who want to customize the pipeline behavior or develop new methods.
-    
+
+    Runs the same stages as `run_optimisation`, one at a time, so intermediate
+    results can be inspected or modified between stages.
+
     Examples
     --------
-    >>> # Custom warmup strategy
-    >>> runner = StageRunner()
-    >>> warmup_params = runner.warmup(
-    ...     data, targets,
-    ...     n_samples=2000,
-    ...     strategy="sobol"
-    ... )
-    
-    >>> # Custom outlier removal
-    >>> clean_data = runner.remove_outliers(
-    ...     data, warmup_params,
-    ...     method="isolation_forest"
-    ... )
-    
-    >>> # Custom optimisation
-    >>> final_params = runner.optimize(
-    ...     clean_data, targets,
-    ...     sampler=optuna.samplers.QMCSampler()
-    ... )
+    >>> runner = StageRunner(PipelineConfig.from_yaml("UKB_filter.yaml"))
+    >>> targets = runner.calculate_targets(reference)
+    >>> warmup_params = runner.warmup(data, targets, n_trials=100)
+    >>> clean_data = runner.remove_outliers(data, warmup_params, min_dnm=5, max_dnm=200)
+    >>> final_params = runner.optimize(clean_data, targets, n_trials=1000)
     """
-    
+
     def __init__(self, config: Optional[PipelineConfig] = None):
         """Initialize with optional base configuration."""
         self.config = config or PipelineConfig()
         self.pipeline = OptimisationPipeline(self.config)
-    
+
+    def calculate_targets(self, reference: VariantDataset) -> Dict[str, Any]:
+        """Fit dnm_count ~ paternal_age on the reference, per variant type."""
+        return self.pipeline._calculate_targets(reference)
+
     def warmup(
         self,
         data: VariantDataset,
         targets: Dict[str, Any],
         n_trials: int = 50,
-        **kwargs
     ) -> Dict[str, Dict[str, Any]]:
-        """Run warmup stage with custom parameters."""
-        # Allow overriding config for this stage
+        """Run the warmup stage (Stage 1) with `n_trials` trials per variant type."""
         original_trials = self.config.stage1.n_trials
         self.config.stage1.n_trials = n_trials
-        
+
         try:
-            result = self.pipeline._run_warmup(data, targets)
+            result = self.pipeline._run_warmup_sequential(data, targets)
         finally:
             self.config.stage1.n_trials = original_trials
-        
+
         return result
-    
+
     def remove_outliers(
         self,
         data: VariantDataset,
         warmup_params: Dict[str, Dict[str, Any]],
         min_dnm: Optional[int] = None,
         max_dnm: Optional[int] = None,
-        **kwargs
     ) -> VariantDataset:
-        """Remove outliers with custom thresholds."""
-        # Override thresholds if provided
+        """Run outlier removal (Stage 2) and return a dataset of the kept samples.
+
+        min_dnm / max_dnm override the configured thresholds for this call only.
+        """
+        original = (self.config.stage2.min_dnm_count, self.config.stage2.max_dnm_count)
         if min_dnm is not None:
             self.config.stage2.min_dnm_count = min_dnm
         if max_dnm is not None:
             self.config.stage2.max_dnm_count = max_dnm
-        
-        clean_data, n_removed = self.pipeline._remove_outliers(data, warmup_params)
+
+        try:
+            samples_to_keep, n_removed = self.pipeline._identify_outliers(data, warmup_params)
+        finally:
+            self.config.stage2.min_dnm_count, self.config.stage2.max_dnm_count = original
+
         logger.info(f"Removed {n_removed} outliers")
-        
-        return clean_data
-    
+        kept = data.variants[data.variants['SAMPLE'].isin(samples_to_keep)]
+        return VariantDataset(variants=kept.copy(), metadata=dict(data.metadata))
+
     def optimize(
         self,
         data: VariantDataset,
         targets: Dict[str, Any],
         n_trials: int = 500,
-        sampler: Optional[Any] = None,
-        pruner: Optional[Any] = None,
-        **kwargs
     ) -> Dict[str, Dict[str, Any]]:
-        """Run optimisation stage with custom settings."""
-        # Can accept custom Optuna samplers/pruners
+        """Run full optimisation (Stage 3), once, with `n_trials` trials per variant type."""
         original_trials = self.config.stage3.n_trials
         self.config.stage3.n_trials = n_trials
-        
+
         try:
-            params, _, _ = self.pipeline._run_full_optimisation(data, targets)
+            params, _ = self.pipeline._run_full_optimisation_sequential(data, targets)
         finally:
             self.config.stage3.n_trials = original_trials
-        
+
         return params
 
 
@@ -349,7 +352,8 @@ def calculate_regression_targets(
     variant_types : list, optional
         Variant types to process. Default: ["SNV", "Insertion", "Deletion"]
     formula : str
-        Regression formula for statsmodels
+        Currently ignored; targets are always fitted with dnm_count ~ paternal_age.
+        Reference columns use the default names (sample_id, paternal_age, ref, alt).
     
     Returns
     -------
@@ -369,6 +373,8 @@ def calculate_regression_targets(
             maternal_age_col=config.optimisation.maternal_age_column_reference,
             reference_col=config.optimisation.reference_column_reference,
             alternate_col=config.optimisation.alternate_column_reference,
+            chrom_col=config.optimisation.chromosome_column_reference,
+            pos_col=config.optimisation.position_column_reference,
             columns=config.optimisation.get_input_columns('reference'),
         )
     config.optimisation.variant_types = variant_types

@@ -82,7 +82,7 @@ class OptimisationArrays:
     # VAF values per variant (for VAF quality penalty in objective)
     vaf_values: Optional[np.ndarray]  # shape (n_variants,), None if not available
     
-    # Parental ages per sample (indexed by sample_idx)
+    # Paternal ages per sample (indexed by sample_idx)
     paternal_ages: np.ndarray  # shape (n_samples,)
     valid_age_mask: np.ndarray  # bool array for samples with valid ages
     
@@ -135,8 +135,8 @@ def extract_optimisation_arrays(
     # Encode sample IDs as integers (only for variants in df)
     # Samples not in df will have 0 count via bincount
     if len(df) > 0:
-        # Map sample IDs, using -1 for any samples in df but not in our sample list
-        # (shouldn't happen if all_sample_ages is comprehensive, but be safe)
+        # Map sample IDs, using -1 for samples not in all_sample_ages
+        # (e.g. samples with missing paternal age); their variants are dropped
         sample_ids = df[sample_col].map(lambda x: sample_id_to_idx.get(x, -1)).values.astype(np.int32)
         # Filter out any -1 values (samples not in our list)
         valid_variant_mask = sample_ids >= 0
@@ -248,7 +248,7 @@ class MemoryEfficientPipeline:
     def __init__(self, config: PipelineConfig):
         self.config = config
         
-        # Set up caching
+        # joblib Memory is created but not currently used for caching
         if config.use_cache:
             cache_dir = config.cache_dir or './cache'
             self.memory = Memory(cache_dir, verbose=0)
@@ -329,7 +329,7 @@ class MemoryEfficientPipeline:
         scores = {}
         if self.config.stage3.enabled:
             logger.info(f"Running full optimisation with {self.config.stage3.n_trials} trials...")
-            logger.info(f"Sampler: {self.config.stage3.sampler}, Pruner: {self.config.stage3.pruner}")
+            logger.info(f"Sampler: {self.config.stage3.sampler} (pruning disabled)")
             
             # Iterative optimization: remove outliers based on current best params until stable
             max_iterations = 5
@@ -567,7 +567,7 @@ class MemoryEfficientPipeline:
             vaf_col = self.config.optimisation.vaf_column if self.config.optimisation.vaf_quality_metric else None
             arrays = extract_optimisation_arrays(var_df, filter_columns, all_sample_ages=all_sample_ages, vaf_col=vaf_col)
             
-            # Debug: Log how many samples have variants vs 0 BEFORE any filtering
+            # Debug: Log how many samples have variants vs 0 before threshold filtering
             if arrays.n_variants > 0:
                 all_counts = count_per_sample_fast(arrays.sample_ids, np.ones(arrays.n_variants, dtype=bool), arrays.n_samples)
             else:
@@ -577,7 +577,7 @@ class MemoryEfficientPipeline:
             n_with_var = np.sum(valid_counts_pre > 0)
             n_zero = np.sum(valid_counts_pre == 0)
             mean_count = np.mean(valid_counts_pre)
-            logger.info(f"  DEBUG {var_type} Stage3: {n_with_var}/{len(valid_counts_pre)} have >=1 variant, {n_zero} have 0, mean={mean_count:.2f}")
+            logger.info(f"  DEBUG {var_type} warmup: {n_with_var}/{len(valid_counts_pre)} have >=1 variant, {n_zero} have 0, mean={mean_count:.2f}")
             
             # Debug: Log how many samples have variants vs 0
             all_counts = count_per_sample_fast(arrays.sample_ids, np.ones(arrays.n_variants, dtype=bool), arrays.n_samples)
@@ -606,105 +606,31 @@ class MemoryEfficientPipeline:
         
         return warmup_params
     
-    def _identify_outliers(
-        self,
-        data: VariantDataset,
-        warmup_params: Dict[str, Dict[str, Any]]
-    ) -> Tuple[set, int]:
-        """Stage 2: Identify outlier samples based on filtered DNM counts.
-        
-        Returns set of samples to keep and count of removed samples.
-        """
-        logger.info("Counting filtered DNMs per individual...")
-        
-        # Count filtered DNMs per sample across all variant types
-        sample_counts = {}
-        
-        for var_type, params in warmup_params.items():
-            type_mask = data.variants['var_type'] == var_type
-            var_df = data.variants[type_mask]
-            
-            if len(var_df) == 0:
-                continue
-            
-            logger.info(f"  {var_type}: {len(var_df)} variants before warmup filters")
-            
-            # Apply filters using boolean mask
-            filter_mask = np.ones(len(var_df), dtype=bool)
-            for param, value in params.items():
-                if param.startswith('min_'):
-                    col = param[4:]
-                    if col in var_df.columns:
-                        col_vals = pd.to_numeric(var_df[col], errors='coerce')
-                        filter_mask &= (col_vals >= value).values & (~col_vals.isna()).values
-                elif param.startswith('max_'):
-                    col = param[4:]
-                    if col in var_df.columns:
-                        col_vals = pd.to_numeric(var_df[col], errors='coerce')
-                        filter_mask &= (col_vals <= value).values & (~col_vals.isna()).values
-            
-            filtered_count = filter_mask.sum()
-            logger.info(f"  {var_type}: {filtered_count} variants after warmup filters ({filtered_count/len(var_df)*100:.1f}% retained)")
-            
-            # Count per sample
-            filtered_df = var_df[filter_mask]
-            type_counts = filtered_df.groupby('SAMPLE').size()
-            
-            for sample, count in type_counts.items():
-                sample_counts[sample] = sample_counts.get(sample, 0) + count
-        
-        # Convert to series for analysis
-        total_counts = pd.Series(sample_counts).sort_values()
-        initial_count = len(total_counts)
-        
-        logger.info(f"DNM count distribution across {initial_count} individuals:")
-        logger.info(f"  Min: {total_counts.min()}, Max: {total_counts.max()}, Mean: {total_counts.mean():.1f}, Median: {total_counts.median():.1f}")
-        
-        # Identify samples to keep
-        samples_to_keep = set(total_counts.index)
-        
-        if self.config.stage2.min_dnm_count:
-            below_min = total_counts[total_counts < self.config.stage2.min_dnm_count]
-            samples_to_keep -= set(below_min.index)
-            logger.info(f"Removing {len(below_min)} individuals with < {self.config.stage2.min_dnm_count} DNMs")
-        
-        if self.config.stage2.max_dnm_count:
-            above_max = total_counts[total_counts > self.config.stage2.max_dnm_count]
-            samples_to_keep -= set(above_max.index)
-            logger.info(f"Removing {len(above_max)} individuals with > {self.config.stage2.max_dnm_count} DNMs")
-        
-        n_removed = initial_count - len(samples_to_keep)
-        logger.info(f"Outlier removal complete: kept {len(samples_to_keep)}/{initial_count} individuals")
-        
-        return samples_to_keep, n_removed
-    
-    def _identify_outliers_with_params(
+    def _count_filtered_per_sample(
         self,
         data: VariantDataset,
         params: Dict[str, Dict[str, Any]],
-        current_samples: Optional[set] = None
-    ) -> Tuple[set, int]:
-        """Identify outlier samples based on filtered DNM counts with given params.
-        
-        Similar to _identify_outliers but works with any parameter set and 
-        optionally restricts to a subset of samples.
-        
-        Returns set of samples to keep and count of removed samples.
+        samples: Optional[set] = None,
+        log_retention: bool = False,
+    ) -> pd.Series:
+        """Count variants passing `params` per sample, summed over variant types.
+
+        Every sample in `samples` (or in the data, if None) is included, with a count
+        of 0 when none of its variants pass, so min_dnm_count applies to them too.
         """
-        # Count filtered DNMs per sample across all variant types
-        sample_counts = {}
-        
+        if samples is None:
+            samples = set(data.variants['SAMPLE'].dropna().unique())
+
+        total_counts = pd.Series(0, index=sorted(samples, key=str), dtype=np.int64)
+
         for var_type, var_params in params.items():
             type_mask = data.variants['var_type'] == var_type
-            if current_samples is not None:
-                type_mask &= data.variants['SAMPLE'].isin(current_samples)
-            
+            type_mask &= data.variants['SAMPLE'].isin(samples)
             var_df = data.variants[type_mask]
-            
+
             if len(var_df) == 0:
                 continue
-            
-            # Apply filters using boolean mask
+
             filter_mask = np.ones(len(var_df), dtype=bool)
             for param, value in var_params.items():
                 if param.startswith('min_'):
@@ -717,42 +643,81 @@ class MemoryEfficientPipeline:
                     if col in var_df.columns:
                         col_vals = pd.to_numeric(var_df[col], errors='coerce')
                         filter_mask &= (col_vals <= value).values & (~col_vals.isna()).values
-            
-            # Count per sample
-            filtered_df = var_df[filter_mask]
-            type_counts = filtered_df.groupby('SAMPLE').size()
-            
-            for sample, count in type_counts.items():
-                sample_counts[sample] = sample_counts.get(sample, 0) + count
-        
-        # Convert to series for analysis
-        total_counts = pd.Series(sample_counts).sort_values()
-        
-        # Start with current samples or all samples
-        if current_samples is not None:
-            samples_to_keep = set(current_samples)
-        else:
-            samples_to_keep = set(total_counts.index)
-        
-        initial_count = len(samples_to_keep)
-        
-        # Apply thresholds
+
+            if log_retention:
+                filtered_count = filter_mask.sum()
+                logger.info(f"  {var_type}: {filtered_count}/{len(var_df)} variants pass filters ({filtered_count/len(var_df)*100:.1f}% retained)")
+
+            type_counts = var_df[filter_mask].groupby('SAMPLE', observed=True).size()
+            total_counts = total_counts.add(type_counts, fill_value=0).astype(np.int64)
+
+        return total_counts.sort_values()
+
+    def _apply_dnm_count_thresholds(self, total_counts: pd.Series, log: bool = True) -> set:
+        """Return samples whose filtered DNM count lies within [min_dnm_count, max_dnm_count]."""
+        samples_to_keep = set(total_counts.index)
+
         if self.config.stage2.min_dnm_count:
             below_min = total_counts[total_counts < self.config.stage2.min_dnm_count]
             samples_to_keep -= set(below_min.index)
-        
+            if log:
+                n_zero = int((below_min == 0).sum())
+                logger.info(f"Removing {len(below_min)} individuals with < {self.config.stage2.min_dnm_count} DNMs ({n_zero} with 0)")
+
         if self.config.stage2.max_dnm_count:
             above_max = total_counts[total_counts > self.config.stage2.max_dnm_count]
-            removed_above = set(above_max.index) & samples_to_keep
-            if removed_above:
-                logger.info(f"  Samples exceeding max_dnm_count ({self.config.stage2.max_dnm_count}): {len(removed_above)}")
-                logger.info(f"  Their counts: {[int(total_counts[s]) for s in list(removed_above)[:10]]}{'...' if len(removed_above) > 10 else ''}")
             samples_to_keep -= set(above_max.index)
-        
+            if log:
+                logger.info(f"Removing {len(above_max)} individuals with > {self.config.stage2.max_dnm_count} DNMs")
+                if len(above_max):
+                    shown = [int(c) for c in above_max.values[:10]]
+                    logger.info(f"  Their counts: {shown}{'...' if len(above_max) > 10 else ''}")
+
+        return samples_to_keep
+
+    def _identify_outliers(
+        self,
+        data: VariantDataset,
+        warmup_params: Dict[str, Dict[str, Any]]
+    ) -> Tuple[set, int]:
+        """Stage 2: Identify outlier samples based on filtered DNM counts.
+
+        Samples with 0 filtered DNMs count as having 0, so they are removed when
+        min_dnm_count is set. Returns the set of samples to keep and the number removed.
+        """
+        logger.info("Counting filtered DNMs per individual...")
+        total_counts = self._count_filtered_per_sample(data, warmup_params, log_retention=True)
+        initial_count = len(total_counts)
+
+        logger.info(f"DNM count distribution across {initial_count} individuals:")
+        logger.info(f"  Min: {total_counts.min()}, Max: {total_counts.max()}, Mean: {total_counts.mean():.1f}, Median: {total_counts.median():.1f}")
+
+        samples_to_keep = self._apply_dnm_count_thresholds(total_counts)
+
         n_removed = initial_count - len(samples_to_keep)
-        
+        logger.info(f"Outlier removal complete: kept {len(samples_to_keep)}/{initial_count} individuals")
+
         return samples_to_keep, n_removed
-    
+
+    def _identify_outliers_with_params(
+        self,
+        data: VariantDataset,
+        params: Dict[str, Dict[str, Any]],
+        current_samples: Optional[set] = None
+    ) -> Tuple[set, int]:
+        """Identify outlier samples based on filtered DNM counts with given params.
+
+        Same rules as _identify_outliers, optionally restricted to `current_samples`.
+        Returns the set of samples to keep and the number removed.
+        """
+        total_counts = self._count_filtered_per_sample(data, params, current_samples)
+        initial_count = len(total_counts)
+
+        samples_to_keep = self._apply_dnm_count_thresholds(total_counts)
+
+        n_removed = initial_count - len(samples_to_keep)
+        return samples_to_keep, n_removed
+
     def _run_full_optimisation_sequential(
         self,
         data: VariantDataset,
@@ -854,8 +819,10 @@ class MemoryEfficientPipeline:
         """
         Optimize filter parameters to match reference regression coefficients.
         
-        This method directly optimizes the slope and intercept of the 
-        dnm_count ~ paternal_age regression to match reference values.
+        Minimises the configured loss, usually the distance of the
+        dnm_count ~ paternal_age slope/intercept from the reference values
+        (max_slope and correlation behave differently), plus the optional
+        weighted VAF penalty. use_pruning is currently ignored.
         
         Returns:
             Tuple of (best_params, best_score, study, trial_history)
@@ -991,7 +958,7 @@ class MemoryEfficientPipeline:
                 loss = intercept_weight * intercept_error + slope_weight * slope_error
                 
             elif loss_fn == "slope_priority":
-                # Optimize slope first, only penalize intercept if way off
+                # Slope squared error, plus intercept penalty only beyond intercept_tolerance
                 slope_error = slope_rel_error ** 2
                 # Soft constraint on intercept - only penalize if outside tolerance
                 intercept_deviation = abs(intercept_rel_error)
@@ -1012,8 +979,7 @@ class MemoryEfficientPipeline:
                 
             elif loss_fn == "max_slope":
                 # Maximize slope with soft intercept constraint
-                # Negative slope means we want to maximize it
-                slope_loss = -slope / ref_pat_slope  # Negative to maximize
+                slope_loss = -slope / ref_pat_slope  # Negated so minimising the loss maximises the slope
                 
                 # Add penalty if intercept deviates too much
                 intercept_deviation = abs(intercept_rel_error)
@@ -1023,7 +989,7 @@ class MemoryEfficientPipeline:
                     intercept_penalty = 0
                 
                 loss = slope_weight * slope_loss + intercept_penalty
-                # For tracking, use absolute values
+                # For tracking, record squared relative errors
                 slope_error = slope_rel_error ** 2
                 intercept_error = intercept_rel_error ** 2
                 
@@ -1085,7 +1051,7 @@ class MemoryEfficientPipeline:
         
         sampler = sampler_map.get(self.config.stage3.sampler, optuna.samplers.TPESampler(seed=self.config.seed))
         
-        # Disable pruner for stability unless explicitly requested and safe
+        # Pruning is always disabled; stage3.pruner and use_pruning are currently ignored
         pruner = None 
         
         study = optuna.create_study(
@@ -1096,7 +1062,6 @@ class MemoryEfficientPipeline:
         )
         
         n_jobs = self.config.max_workers
-        # Cap workers to avoid overhead on simple objective
         if n_jobs > 1:
             logger.info(f"  Running {n_trials} trials...")
             
@@ -1199,8 +1164,9 @@ class MemoryEfficientPipeline:
             elif spec.optimisation == 'range':
                 if spec.symmetric_scale is not None:
                     # Symmetric range
+                    # min_ goes up to the midpoint so that max_ = scale - min_ stays >= min_
                     lower_bound = lower
-                    upper_bound = spec.symmetric_scale - lower
+                    upper_bound = spec.symmetric_scale / 2
 
                     if spec.dtype == 'int' and not is_cmaes:
                         suggested_lower = trial.suggest_int(f'min_{col}', int(lower_bound), int(upper_bound))
@@ -1237,11 +1203,11 @@ class MemoryEfficientPipeline:
                 continue
             
             first_col = group[0]
-            param_keys = [k for k in params.keys() if k.endswith(f'_{first_col}')]
-            
-            for key in param_keys:
+            for prefix in ('min', 'max'):
+                key = f'{prefix}_{first_col}'
+                if key not in params:
+                    continue
                 param_value = params[key]
-                prefix = key.split('_')[0]
                 
                 for linked_col in group[1:]:
                     linked_key = f'{prefix}_{linked_col}'
@@ -1310,7 +1276,8 @@ class MemoryEfficientPipeline:
 
         for spec in specs:
             prefix = 'max' if spec.optimisation == 'minimum' else 'min'
-            logger.info(f"  {prefix}_{spec.column} search space: [{spec.lower:.2f}, {spec.upper:.2f}]")
+            upper = spec.symmetric_scale / 2 if spec.symmetric_scale is not None else spec.upper
+            logger.info(f"  {prefix}_{spec.column} search space: [{spec.lower:.2f}, {upper:.2f}]")
 
         linked_groups = [
             [col_config.name for col_config in group]
